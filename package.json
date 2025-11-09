@@ -1,0 +1,17 @@
+{
+  "name": "dymachot",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "Macius",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "discord.js": "^14.24.2",
+    "dotenv": "^17.2.3"
+  },
+  "keywords": []
+}

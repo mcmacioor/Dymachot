@@ -198,6 +198,87 @@ function getStateByAnyId(anyId) {
   return null
 }
 
+// ─────────────────────────── Soft recovery z wiadomości ───────────────────────────
+async function recoverFromMessage(interaction, panelId) {
+  try {
+    const msg = interaction?.message
+    if (!msg) return null
+
+    // Pobierz pierwszy embed i surową treść
+    const emb = msg.embeds?.[0]
+    const desc = emb?.data?.description || emb?.description || ''
+    if (!desc) return null
+
+    // **Lider:** <@123>
+    const leaderMatch = desc.match(/\*\*Lider:\*\*\s*<@!?(\d+)>/)
+    const leaderId = leaderMatch?.[1] || interaction.user?.id
+
+    // **Co:** Nazwa rajdu
+    const coMatch = desc.match(/\*\*Co:\*\*\s*([^\n]+)/)
+    const raidName = coMatch ? coMatch[1].trim() : 'Raid'
+
+    // **Kiedy:** <...> [czas]
+    const kiedyMatch = desc.match(/\*\*Kiedy:\*\*\s*(.+?)\s*\[(.+?)\]/)
+    let dateText = '', timeText = '', duration = ''
+    if (kiedyMatch) {
+      const kiedyRaw = (kiedyMatch[1] || '').trim()
+      duration = (kiedyMatch[2] || '').trim()
+      const partsDT = kiedyRaw.split(' ')
+      timeText = partsDT[partsDT.length - 1] || ''
+      dateText = kiedyRaw.replace(new RegExp(`\\s*${timeText}\\s*$`), '').trim()
+    }
+
+    // **Wymogi:** ... (do najbliższej linii z separatorami)
+    let requirements = '—'
+    const wymogiIdx = desc.indexOf('**Wymogi:**')
+    if (wymogiIdx >= 0) {
+      const after = desc.slice(wymogiIdx + '**Wymogi:**'.length)
+      const cut = after.split('──────────────────────────────')[0] || after
+      requirements = cut.trim()
+    }
+
+    // **Skład ( x/Y ):**
+    let capacity = 20
+    const skladMatch = desc.match(/\*\*Skład\s*\(\s*\d+\s*\/\s*(\d+)\s*\)\s*:\*\*/)
+    if (skladMatch) {
+      const capNum = parseInt(skladMatch[1], 10)
+      if (!isNaN(capNum) && capNum > 0) capacity = capNum
+    }
+
+    const startAtDate = parsePolishDate(dateText, timeText)
+    const meta = {
+      leaderId,
+      leaderMention: `<@${leaderId}>`,
+      raidName,
+      requirements,
+      dateText,
+      timeText,
+      duration,
+      startAt: startAtDate ? startAtDate.getTime() : undefined,
+      closed: false,
+    }
+
+    const state = {
+      panelId,
+      capacity,
+      main: [],
+      reserve: [],
+      meta,
+      channelId: msg.channelId,
+      messageId: msg.id,
+      guildId: msg.guildId,
+    }
+
+    raids.set(panelId, state)
+    saveStateDebounced()
+    console.log(`♻️ Recovery: adoptowano panel ${panelId} z wiadomości.`)
+    return state
+  } catch (e) {
+    console.error('recoverFromMessage error:', e)
+    return null
+  }
+}
+
 // ─────────────────────────── Render ───────────────────────────
 function buildEmbed(guild, { meta, main, reserve, capacity }) {
   const { leaderMention, raidName, dateText, timeText, duration, requirements, closed } = meta
@@ -379,7 +460,7 @@ client.on('interactionCreate', async interaction => {
   const panelId = genPanelId()
   const embed = buildEmbed(interaction.guild, { meta, main: [], reserve: [], capacity })
 
-  // jeśli ktoś jakimś cudem podał >20 (np. stara zcache'owana komenda), poinformuj grzecznie
+  // jeśli ktoś jakimś cudem podał >20 (np. stara zcache'owana komenda), poininformuj grzecznie
   const ephemeralNote = requested > 20
     ? { content: '⚠️ Maksymalna liczba miejsc to 20 — przycięto do 20.', ephemeral: true }
     : null
@@ -387,7 +468,6 @@ client.on('interactionCreate', async interaction => {
   await interaction.reply({
     embeds: [embed],
     components: [buttonsRow(panelId), altButtonsRow(panelId), manageRow(panelId)],
-    ...(ephemeralNote ? {} : {}) // reply i tak idzie jako public; notkę doślemy osobno jeśli trzeba
   })
   if (ephemeralNote) {
     try { await interaction.followUp(ephemeralNote) } catch {}
@@ -474,8 +554,13 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isButton()) {
       const [prefix, anyId, action] = interaction.customId.split(':')
       if (prefix !== 'raid') return
-      const state = getStateByAnyId(anyId)
-      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      let state = getStateByAnyId(anyId)
+      if (!state) {
+        state = await recoverFromMessage(interaction, anyId)
+        if (!state) {
+          return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny (brak danych do odzyskania).', ephemeral: true })
+        }
+      }
       const panelId = state.panelId
       const userId = interaction.user.id
       const isLeader = userId === state.meta.leaderId
@@ -661,8 +746,13 @@ client.on('interactionCreate', async interaction => {
       const parts = interaction.customId.split(':') // raid:<anyId>:pickclass|picksp:...
       if (parts[0] !== 'raid') return
       const anyId = parts[1]
-      const state = getStateByAnyId(anyId)
-      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      let state = getStateByAnyId(anyId)
+      if (!state) {
+        state = await recoverFromMessage(interaction, anyId)
+        if (!state) {
+          return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny (brak danych do odzyskania).', ephemeral: true })
+        }
+      }
 
       if (parts[2] === 'pickclass') {
         const kind = parts[3]
@@ -740,8 +830,13 @@ client.on('interactionCreate', async interaction => {
       if (parts[0] !== 'raid') return
       const anyId = parts[1]
       const mode = parts[2] === 'pickuser' ? parts[3] : null
-      const state = getStateByAnyId(anyId)
-      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      let state = getStateByAnyId(anyId)
+      if (!state) {
+        state = await recoverFromMessage(interaction, anyId)
+        if (!state) {
+          return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny (brak danych do odzyskania).', ephemeral: true })
+        }
+      }
       if (interaction.user.id !== state.meta.leaderId) return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
 
       const targetId = interaction.values[0]

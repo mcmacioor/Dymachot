@@ -294,20 +294,16 @@ function spSelect(panelId, kind, cls, guild) {
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
-  .addStringOption(o =>
-    o.setName('szablon')
-     .setDescription('Opcjonalny szablon rajdu')
-     .addChoices(
-       { name: 'ZTS', value: 'ZTS' },
-       { name: 'Glacernon', value: 'GLACERNON' },
-       { name: 'PTS', value: 'PTS' }
-     )
-     .setRequired(false)
-  )
-  .addUserOption(o => o.setName('lider').setDescription('Lider rajdu').setRequired(true))
+  // .addUserOption(o => o.setName('lider')...)  // ← USUNIĘTE
   .addStringOption(o => o.setName('jaki_raid').setDescription('Jaki rajd').setRequired(true))
   .addStringOption(o => o.setName('wymogi').setDescription('Wymogi').setRequired(true))
-  .addIntegerOption(o => o.setName('ilosc_slotow').setDescription('Ilość miejsc').setMinValue(1).setMaxValue(40).setRequired(true))
+  .addIntegerOption(o =>
+    o.setName('ilosc_slotow')
+     .setDescription('Ilość miejsc (max 20)')
+     .setMinValue(1)
+     .setMaxValue(20) // ← twardy limit w UI
+     .setRequired(true)
+  )
   .addStringOption(o => o.setName('data').setDescription('Data (np. Wtorek, 11 listopada 2025 / 11.11.2025)').setRequired(true))
   .addStringOption(o => o.setName('godzina').setDescription('Godzina (np. 21:00)').setRequired(true))
   .addStringOption(o => o.setName('czas_trwania').setDescription('Czas trwania (np. 1h)').setRequired(true))
@@ -354,24 +350,20 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return
   if (interaction.commandName !== 'raid') return
 
-  const templateKey = interaction.options.getString('szablon')
-  const leader = interaction.options.getUser('lider')
-  let raidName = interaction.options.getString('jaki_raid')
-  let requirements = interaction.options.getString('wymogi')
-  let duration = interaction.options.getString('czas_trwania')
-  const capacity = interaction.options.getInteger('ilosc_slotow')
-  const dateText = interaction.options.getString('data')
-  const timeText = interaction.options.getString('godzina')
+  // lider zawsze autor komendy
+  const leader = interaction.user
 
-  if (templateKey && TEMPLATES[templateKey]) {
-    const t = TEMPLATES[templateKey]
-    raidName = t.raidName
-    requirements = t.requirements
-    duration = t.duration
-  }
+  const raidName    = interaction.options.getString('jaki_raid')
+  const requirements= interaction.options.getString('wymogi')
+  const requested   = interaction.options.getInteger('ilosc_slotow')
+  const capacity    = Math.min(20, Math.max(1, requested)) // twardy clamp 1..20
+
+  const dateText    = interaction.options.getString('data')
+  const timeText    = interaction.options.getString('godzina')
+  const duration    = interaction.options.getString('czas_trwania')
 
   const startAtDate = parsePolishDate(dateText, timeText)
-  const startAt = startAtDate ? startAtDate.getTime() : undefined
+  const startAt     = startAtDate ? startAtDate.getTime() : undefined
 
   const meta = {
     leaderId: leader.id,
@@ -381,30 +373,39 @@ client.on('interactionCreate', async interaction => {
     dateText,
     timeText,
     duration,
-    startAt,
-    closed: false,
+    startAt
   }
 
   const panelId = genPanelId()
-  const embed = buildEmbed(interaction.guild, { meta, main: [], reserve: [], capacity })
+  const embed = buildEmbed({ meta, main: [], reserve: [], capacity })
+
+  // jeśli ktoś jakimś cudem podał >20 (np. stara zcache'owana komenda), poinformuj grzecznie
+  const ephemeralNote = requested > 20
+    ? { content: '⚠️ Maksymalna liczba miejsc to 20 — przycięto do 20.', ephemeral: true }
+    : null
+
   await interaction.reply({
     embeds: [embed],
-    components: [buttonsRow(panelId, false), altButtonsRow(panelId, false), manageRow(panelId)]
+    components: [buttonsRow(panelId), altButtonsRow(panelId), manageRow(panelId)],
+    ...(ephemeralNote ? {} : {}) // reply i tak idzie jako public; notkę doślemy osobno jeśli trzeba
   })
+  if (ephemeralNote) {
+    try { await interaction.followUp(ephemeralNote) } catch {}
+  }
+
   const sent = await interaction.fetchReply()
 
   raids.set(panelId, {
-    panelId,
     capacity,
     main: [],
     reserve: [],
     meta,
     channelId: sent.channelId,
-    messageId: sent.id,
-    guildId: sent.guildId
+    messageId: sent.id
   })
   saveStateDebounced()
 })
+
 
 // ─────────────────────────── Helpery stanu ───────────────────────────
 function removeAllUser(state, userId, { onlyAlts = false } = {}) {
@@ -817,4 +818,5 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 

@@ -221,6 +221,7 @@ function canPost(channel) {
 }
 
 // ─────────────────────────── Soft recovery z wiadomości ───────────────────────────
+// ─────────────────────────── Soft recovery z wiadomości (z odtworzeniem rosteru) ───────────────────────────
 async function recoverFromMessage(interaction, panelId) {
   try {
     const msg = interaction?.message
@@ -230,6 +231,7 @@ async function recoverFromMessage(interaction, panelId) {
     const desc = emb?.data?.description || emb?.description || ''
     if (!desc) return null
 
+    // ——— meta
     const leaderMatch = desc.match(/\*\*Lider:\*\*\s*<@!?(\d+)>/)
     const leaderId = leaderMatch?.[1] || interaction.user?.id
 
@@ -247,20 +249,55 @@ async function recoverFromMessage(interaction, panelId) {
     }
 
     let requirements = '—'
-    const wymogiIdx = desc.indexOf('**Wymogi:**')
-    if (wymogiIdx >= 0) {
-      const after = desc.slice(wymogiIdx + '**Wymogi:**'.length)
-      const cut = after.split('──────────────────────────────')[0] || after
-      requirements = cut.trim()
+    {
+      const m = desc.match(/\*\*Wymogi:\*\*([\s\S]*?)──────────────────────────────/)
+      if (m) requirements = m[1].trim()
     }
 
+    // ——— capacity
     let capacity = 20
-    const skladMatch = desc.match(/\*\*Skład\s*\(\s*\d+\s*\/\s*(\d+)\s*\)\s*:\*\*/)
-    if (skladMatch) {
-      const capNum = parseInt(skladMatch[1], 10)
-      if (!isNaN(capNum) && capNum > 0) capacity = capNum
+    {
+      const m = desc.match(/\*\*Skład\s*\(\s*\d+\s*\/\s*(\d+)\s*\)\s*:\*\*/)
+      if (m) {
+        const capNum = parseInt(m[1], 10)
+        if (!isNaN(capNum) && capNum > 0) capacity = capNum
+      }
     }
 
+    // ——— parser linii: "1. <@123> … [SP 6] (Alt)"
+    function parseRosterBlock(blockText) {
+      const out = []
+      const lines = blockText.split('\n')
+      for (const ln of lines) {
+        // pomiń puste i myślniki
+        if (!ln.trim() || /—$/.test(ln.trim())) continue
+        const id = (ln.match(/<@!?(\d+)>/) || [])[1]
+        if (!id) continue
+        const cls = (ln.match(/\[(Łucznik|Wojownik|Mag|MSW)\]/i) || [])[1]
+        let sp = parseInt((ln.match(/\[SP\s*(\d{1,2})\]/i) || [])[1], 10)
+        if (isNaN(sp)) sp = undefined
+        const isAlt = /\(Alt\)/i.test(ln)
+        out.push({ userId: id, cls: cls || 'Łucznik', sp: sp || 1, isAlt: !!isAlt })
+      }
+      return out
+    }
+
+    // ——— wydziel bloki "Skład" i "Rezerwa"
+    let main = []
+    let reserve = []
+    {
+      // łapiemy od "Skład (...):" do kolejnej pustej linii pod listą
+      const mainMatch = desc.match(/\*\*Skład[^\n]*:\*\*([\s\S]*?)\n\s*\n/)
+      const afterMain = mainMatch ? desc.slice(mainMatch.index + mainMatch[0].length - mainMatch[1].length) : ''
+      const reserveMatch =
+        desc.match(/\*\*Rezerwa:\*\*([\s\S]*)$/) ||
+        (afterMain ? afterMain.match(/\*\*Rezerwa:\*\*([\s\S]*)$/) : null)
+
+      if (mainMatch) main = parseRosterBlock(mainMatch[1].trim())
+      if (reserveMatch) reserve = parseRosterBlock(reserveMatch[1].trim())
+    }
+
+    // ——— meta + state
     const startAtDate = parsePolishDate(dateText, timeText)
     const meta = {
       leaderId,
@@ -277,8 +314,8 @@ async function recoverFromMessage(interaction, panelId) {
     const state = {
       panelId,
       capacity,
-      main: [],
-      reserve: [],
+      main,
+      reserve,
       meta,
       channelId: msg.channelId,
       messageId: msg.id,
@@ -287,13 +324,14 @@ async function recoverFromMessage(interaction, panelId) {
 
     raids.set(panelId, state)
     saveStateDebounced()
-    console.log(`♻️ Recovery: adoptowano panel ${panelId} z wiadomości.`)
+    console.log(`♻️ Recovery: adoptowano panel ${panelId} z wiadomości (odtworzono ${main.length}+${reserve.length}).`)
     return state
   } catch (e) {
     console.error('recoverFromMessage error:', e)
     return null
   }
 }
+
 
 // ─────────────────────────── Render ───────────────────────────
 function buildEmbed(guild, { meta, main, reserve, capacity }) {
@@ -989,3 +1027,4 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

@@ -395,18 +395,9 @@ client.on('interactionCreate', async interaction => {
     let [prefix, mid, action] = interaction.customId.split(':')
     if (prefix !== 'raid') return
     const messageId = (mid === 'PENDING' && interaction.message?.id) ? interaction.message.id : mid
-
-    // spróbuj od razu podmienić komponenty, jeśli ktoś kliknął „za wcześnie”
-    if (mid === 'PENDING' && interaction.message?.editable) {
-      try {
-        await interaction.message.edit({
-          components: [buttonsRow(messageId), altButtonsRow(messageId), manageRow(messageId)],
-        })
-      } catch {}
-    }
-
     const state = raids.get(messageId)
     if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+
 
     const userId = interaction.user.id
     const isLeader = userId === state.meta.leaderId
@@ -678,3 +669,4 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

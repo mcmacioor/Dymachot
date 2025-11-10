@@ -601,10 +601,26 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (action === 'manage') {
-        // tylko lider
-        if (!isLeader) {
-          return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
-        }
+      if (!isLeader) {
+        return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
+      }
+    
+      try {
+        await interaction.deferUpdate(); // ← najważniejsze
+        await interaction.followUp({
+          ephemeral: true,
+          content: 'Panel zarządzania:',
+          components: [managePanelRow(panelId), managePanelRow2(panelId)]
+        });
+      } catch (err) {
+        console.error('manage panel error:', err);
+        try {
+          await interaction.followUp({ ephemeral: true, content: '❌ Nie udało się otworzyć panelu zarządzania.' })
+        } catch {}
+      }
+      return;
+    }
+
       
         try {
           // szybki defer, żeby Discord nie wywalił timeoutu
@@ -991,4 +1007,5 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 

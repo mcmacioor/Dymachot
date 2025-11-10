@@ -22,51 +22,21 @@ const {
 } = require('discord.js')
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel, Partials.Message]
 })
 
-// generator unikalnego ID panelu
+// ─────────────────────────── Stan ───────────────────────────
+const raids = new Map() // Map<panelId, State>
 const genPanelId = () => crypto.randomUUID()
 
-/**
- * Map<panelId, {
- *   capacity: number,
- *   main: Array<{ userId: string, cls: string, sp: number, isAlt: boolean }>,
- *   reserve: Array<{ userId: string, cls: string, sp: number, isAlt: boolean }>,
- *   meta: {
- *     leaderId: string,
- *     leaderMention: string,
- *     raidName: string,
- *     dateText: string,
- *     timeText: string,
- *     duration: string,
- *     requirements: string,
- *     startAt?: number
- *   },
- *   channelId: string,
- *   messageId: string
- * }>
- */
-const raids = new Map()
-
-// ─────────────────────────── Trwałość (JSON) ───────────────────────────
+// ─────────────────────────── Trwałość ───────────────────────────
 const DATA_PATH = process.env.RAIDS_PATH || path.join(__dirname, 'raids.json')
 if (!fs.existsSync(DATA_PATH)) fs.writeFileSync(DATA_PATH, JSON.stringify({}), 'utf8')
 
 function parsePolishDate(dateText, timeText) {
   if (!dateText || !timeText) return null
-  const norm = s => s.toLowerCase()
-    .replaceAll(',', ' ')
-    .replaceAll('.', ' ')
-    .replaceAll('-', ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-
+  const norm = s => s.toLowerCase().replaceAll(',', ' ').replaceAll('.', ' ').replaceAll('-', ' ').replace(/\s+/g, ' ').trim()
   const MONTHS = {
     'stycznia': 1, 'styczen': 1, 'styczeń': 1,
     'lutego': 2, 'luty': 2,
@@ -81,11 +51,10 @@ function parsePolishDate(dateText, timeText) {
     'listopada': 11, 'listopad': 11,
     'grudnia': 12, 'grudzien': 12, 'grudzień': 12
   }
-
   const d = norm(dateText)
   const t = norm(timeText)
-  let day, month, year
 
+  let day, month, year
   const num = d.match(/(\d{1,2})\s+(\d{1,2})\s+(\d{4})/)
   if (num) {
     day = parseInt(num[1], 10); month = parseInt(num[2], 10); year = parseInt(num[3], 10)
@@ -98,7 +67,6 @@ function parsePolishDate(dateText, timeText) {
     year = parseInt(parts[i + 2], 10)
     month = MONTHS[mname]
   }
-
   if (!day || !month || !year) return null
 
   const tm = t.match(/(\d{1,2})\s*:\s*(\d{2})/)
@@ -138,24 +106,15 @@ let saveTimer = null
 function saveState() {
   const obj = {}
   for (const [k, v] of raids.entries()) obj[k] = v
-  try {
-    fs.writeFileSync(DATA_PATH, JSON.stringify(obj, null, 2), 'utf8')
-  } catch (e) {
-    console.error('Błąd zapisu raids.json:', e)
-  }
+  try { fs.writeFileSync(DATA_PATH, JSON.stringify(obj, null, 2), 'utf8') }
+  catch (e) { console.error('Błąd zapisu raids.json:', e) }
 }
-function saveStateDebounced() {
-  clearTimeout(saveTimer)
-  saveTimer = setTimeout(saveState, 500)
-}
+function saveStateDebounced() { clearTimeout(saveTimer); saveTimer = setTimeout(saveState, 500) }
 
 // ─────────────────────────── Utils ───────────────────────────
 const CLASS_OPTIONS = ['Łucznik', 'Wojownik', 'Mag', 'MSW']
 const CLASS_TO_TOKEN = { 'Łucznik': 'lucznik', 'Wojownik': 'woj', 'Mag': 'mag', 'MSW': 'msw' }
-
-function fmtNowPL() {
-  return new Date().toLocaleString('pl-PL', { timeZone: 'Europe/Warsaw' })
-}
+const fmtNowPL = () => new Date().toLocaleString('pl-PL', { timeZone: 'Europe/Warsaw' })
 function humanizeDelta(ms) {
   const sign = ms >= 0 ? 1 : -1
   const abs = Math.abs(ms)
@@ -197,16 +156,23 @@ function userLine(entry, index) {
   return `${index}. ${tag} ${clsEm} [${entry.cls}] ${spEm} [SP ${entry.sp}]${alt}`
 }
 
+// fallback: znajdź stan także po messageId (stare panele)
+function getStateByAnyId(anyId) {
+  if (raids.has(anyId)) return raids.get(anyId)
+  for (const [, st] of raids.entries()) {
+    if (st && st.messageId === anyId) return st
+  }
+  return null
+}
+
 // ─────────────────────────── Render ───────────────────────────
 function buildEmbed({ meta, main, reserve, capacity }) {
   const { leaderMention, raidName, dateText, timeText, duration, requirements } = meta
-
   const head =
     `**Lider:** ${leaderMention}\n` +
     `**Co:**\n${raidName}\n\n` +
     `**Kiedy:** ${dateText} ${timeText} [${duration}]\n` +
     '──────────────────────────────\n'
-
   const reqAndEquip =
     `**Wymogi:**\n${requirements}\n` +
     equipmentBlock() +
@@ -217,10 +183,7 @@ function buildEmbed({ meta, main, reserve, capacity }) {
     const entry = main[i]
     mainLines.push(entry ? userLine(entry, i + 1) : `${i + 1}. —`)
   }
-
-  const reserveList = reserve.length
-    ? reserve.map((e, i) => userLine(e, i + 1)).join('\n')
-    : '—'
+  const reserveList = reserve.length ? reserve.map((e, i) => userLine(e, i + 1)).join('\n') : '—'
 
   return new EmbedBuilder()
     .setTitle('Dymacho Rajd')
@@ -230,6 +193,24 @@ function buildEmbed({ meta, main, reserve, capacity }) {
       `**Skład ( ${main.length}/${capacity} ):**\n${mainLines.join('\n')}\n\n` +
       `**Rezerwa:**\n${reserveList}`
     )
+}
+
+// edycja bez fetch, gdy to ta sama wiadomość
+async function rerender(interaction, state) {
+  if (!state) return
+  const newEmbed = buildEmbed({ meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
+  if (interaction.message && interaction.message.id === state.messageId) {
+    await interaction.message.edit({ embeds: [newEmbed] })
+    return
+  }
+  const msg = await interaction.channel.messages.fetch(state.messageId)
+  await msg.edit({ embeds: [newEmbed] })
+}
+async function rerenderById(channel, state) {
+  if (!state) return
+  const msg = await channel.messages.fetch(state.messageId)
+  const newEmbed = buildEmbed({ meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
+  await msg.edit({ embeds: [newEmbed] })
 }
 
 // ─────────────────────────── Komponenty ───────────────────────────
@@ -283,7 +264,7 @@ function spSelect(panelId, kind, cls) {
   )
 }
 
-// ─────────────────────────── /raid (tworzenie) ───────────────────────────
+// ─────────────────────────── /raid ───────────────────────────
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
@@ -309,51 +290,6 @@ client.once('ready', async () => {
   try { await registerCommands() } catch (e) { console.error('Rejestracja komend nie powiodła się:', e) }
   loadState()
 })
-
-// ─────────────────────────── Helpery stanu ───────────────────────────
-function removeAllUser(state, userId, { onlyAlts = false } = {}) {
-  const filt = e => e.userId !== userId || (onlyAlts && !e.isAlt)
-  state.main = state.main.filter(filt)
-  state.reserve = state.reserve.filter(filt)
-}
-function pushEntry(state, entry) {
-  if (state.main.length < state.capacity) state.main.push(entry)
-  else state.reserve.push(entry)
-}
-function promoteFromReserve(state) {
-  while (state.main.length < state.capacity && state.reserve.length > 0) {
-    state.main.push(state.reserve.shift())
-  }
-}
-async function rerender(interaction, messageId, state) {
-  const newEmbed = buildEmbed({
-    meta: state.meta,
-    main: state.main,
-    reserve: state.reserve,
-    capacity: state.capacity
-  })
-
-  // jeżeli to jest ta sama wiadomość (kliknięta właśnie)
-  if (interaction.message && interaction.message.id === messageId) {
-    await interaction.message.edit({ embeds: [newEmbed] })
-    return
-  }
-
-  // fallback - tylko jak naprawdę musi pobrać
-  const msg = await interaction.channel.messages.fetch(messageId)
-  await msg.edit({ embeds: [newEmbed] })
-}
-
-async function rerenderById(channel, messageId, state) {
-  const msg = await channel.messages.fetch(messageId)
-  const newEmbed = buildEmbed({
-    meta: state.meta,
-    main: state.main,
-    reserve: state.reserve,
-    capacity: state.capacity
-  })
-  await msg.edit({ embeds: [newEmbed] })
-}
 
 // ─────────────────────────── Tworzenie rajdu ───────────────────────────
 client.on('interactionCreate', async interaction => {
@@ -382,13 +318,9 @@ client.on('interactionCreate', async interaction => {
     startAt
   }
 
-  // tworzymy panel
   const panelId = genPanelId()
   const embed = buildEmbed({ meta, main: [], reserve: [], capacity })
-  await interaction.reply({
-    embeds: [embed],
-    components: [buttonsRow(panelId), altButtonsRow(panelId), manageRow(panelId)],
-  })
+  await interaction.reply({ embeds: [embed], components: [buttonsRow(panelId), altButtonsRow(panelId), manageRow(panelId)] })
   const sent = await interaction.fetchReply()
 
   raids.set(panelId, {
@@ -402,18 +334,27 @@ client.on('interactionCreate', async interaction => {
   saveStateDebounced()
 })
 
-// ─────────────────────────── Sesje zarządzania ───────────────────────────
+// ─────────────────────────── Helpery stanu ───────────────────────────
+function removeAllUser(state, userId, { onlyAlts = false } = {}) {
+  const filt = e => e.userId !== userId || (onlyAlts && !e.isAlt)
+  state.main = state.main.filter(filt)
+  state.reserve = state.reserve.filter(filt)
+}
+function pushEntry(state, entry) { (state.main.length < state.capacity ? state.main : state.reserve).push(entry) }
+function promoteFromReserve(state) { while (state.main.length < state.capacity && state.reserve.length > 0) state.main.push(state.reserve.shift()) }
+
+// ─────────────────────────── Handlery UI ───────────────────────────
 const manageSessions = new Map()
 const sessionKey = (i, panelId) => `${i.user.id}_${panelId}`
 
-// ─────────────────────────── Handlery UI ───────────────────────────
 client.on('interactionCreate', async interaction => {
   // Buttons
   if (interaction.isButton()) {
-    const [prefix, panelId, action] = interaction.customId.split(':')
+    const [prefix, anyId, action] = interaction.customId.split(':')
     if (prefix !== 'raid') return
-    const state = raids.get(panelId)
+    const state = getStateByAnyId(anyId)
     if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+    const panelId = anyId // zachowujemy w customId
 
     const userId = interaction.user.id
     const isLeader = userId === state.meta.leaderId
@@ -439,9 +380,7 @@ client.on('interactionCreate', async interaction => {
       if (JSON.stringify({ main: state.main, reserve: state.reserve }) !== before) {
         await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtNowPL()}.`)
       }
-      promoteFromReserve(state)
-      await rerender(interaction, state)
-      saveStateDebounced()
+      promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
       return interaction.deferUpdate()
     }
 
@@ -449,9 +388,7 @@ client.on('interactionCreate', async interaction => {
       const hadAny = state.main.some(e => e.userId === userId) || state.reserve.some(e => e.userId === userId)
       removeAllUser(state, userId, { onlyAlts: false })
       if (hadAny) await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtNowPL()}.`)
-      promoteFromReserve(state)
-      await rerender(interaction, state)
-      saveStateDebounced()
+      promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
       return interaction.deferUpdate()
     }
 
@@ -459,19 +396,13 @@ client.on('interactionCreate', async interaction => {
       const hadAlts = state.main.some(e => e.userId === userId && e.isAlt) || state.reserve.some(e => e.userId === userId && e.isAlt)
       removeAllUser(state, userId, { onlyAlts: true })
       if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`)
-      promoteFromReserve(state)
-      await rerender(interaction, state)
-      saveStateDebounced()
+      promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
       return interaction.deferUpdate()
     }
 
     if (action === 'signup' || action === 'signup_alt') {
       const kind = action === 'signup_alt' ? 'alt' : 'main'
-      return interaction.reply({
-        ephemeral: true,
-        content: 'Wybierz klasę:',
-        components: [classSelect(panelId, kind)],
-      })
+      return interaction.reply({ ephemeral: true, content: 'Wybierz klasę:', components: [classSelect(panelId, kind)] })
     }
 
     if (action === 'manage') {
@@ -507,16 +438,10 @@ client.on('interactionCreate', async interaction => {
 
     if (action === 'm_setdate') {
       const modal = new ModalBuilder()
-        .setCustomId(`raid:${panelId}:modal:setdate`)
-        .setTitle('Zmień termin rajdu')
-      const dateInput = new TextInputBuilder()
-        .setCustomId('date_text').setLabel('Data (np. 11.11.2025)').setStyle(TextInputStyle.Short).setRequired(true)
-      const timeInput = new TextInputBuilder()
-        .setCustomId('time_text').setLabel('Godzina (np. 21:00)').setStyle(TextInputStyle.Short).setRequired(true)
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(dateInput),
-        new ActionRowBuilder().addComponents(timeInput)
-      )
+        .setCustomId(`raid:${panelId}:modal:setdate`).setTitle('Zmień termin rajdu')
+      const dateInput = new TextInputBuilder().setCustomId('date_text').setLabel('Data (np. 11.11.2025)').setStyle(TextInputStyle.Short).setRequired(true)
+      const timeInput = new TextInputBuilder().setCustomId('time_text').setLabel('Godzina (np. 21:00)').setStyle(TextInputStyle.Short).setRequired(true)
+      modal.addComponents(new ActionRowBuilder().addComponents(dateInput), new ActionRowBuilder().addComponents(timeInput))
       return interaction.showModal(modal)
     }
 
@@ -532,19 +457,14 @@ client.on('interactionCreate', async interaction => {
     if (action === 'm_ping') {
       if (!state.meta.startAt) {
         const d = parsePolishDate(state.meta.dateText, state.meta.timeText)
-        if (d) {
-          state.meta.startAt = d.getTime()
-          saveStateDebounced()
-        }
+        if (d) { state.meta.startAt = d.getTime(); saveStateDebounced() }
       }
-
       const hasStart = typeof state.meta.startAt === 'number'
       const now = Date.now()
       const delta = hasStart ? (state.meta.startAt - now) : null
       const whenTxt = hasStart
-        ? (delta >= 0
-          ? `Start za ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`
-          : `Start był ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`)
+        ? (delta >= 0 ? `Start za ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`
+                      : `Start był ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`)
         : `Termin: **${state.meta.dateText} ${state.meta.timeText}** (brak pewnego timestampu)`
 
       const mainIds = [...new Set(state.main.map(e => e.userId))]
@@ -559,25 +479,21 @@ client.on('interactionCreate', async interaction => {
       )
       return interaction.reply({ content: 'Wysłano oznaczenie ✅', ephemeral: true })
     }
-
     return
   }
 
   // String Select (klasa/SP + manage add SP)
   if (interaction.isStringSelectMenu()) {
-    const parts = interaction.customId.split(':') // raid:<panelId>:pickclass|picksp:...
+    const parts = interaction.customId.split(':') // raid:<anyId>:pickclass|picksp:...
     if (parts[0] !== 'raid') return
-    const panelId = parts[1]
-    const state = raids.get(panelId)
+    const anyId = parts[1]
+    const state = getStateByAnyId(anyId)
     if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
 
     if (parts[2] === 'pickclass') {
       const kind = parts[3]
       const cls = interaction.values[0]
-      return interaction.update({
-        content: `Klasa: **${classEmoji(cls)} ${cls}** – teraz wybierz **SP**:`,
-        components: [spSelect(panelId, kind, cls)]
-      })
+      return interaction.update({ content: `Klasa: **${classEmoji(cls)} ${cls}** – teraz wybierz **SP**:`, components: [spSelect(anyId, kind, cls)] })
     }
 
     if (parts[2] === 'picksp') {
@@ -586,15 +502,11 @@ client.on('interactionCreate', async interaction => {
       const sp = Math.min(cls === 'MSW' ? 7 : 11, parseInt(interaction.values[0], 10))
 
       if (kind === 'madd') {
-        const k = sessionKey(interaction, panelId)
+        const k = sessionKey(interaction, anyId)
         const sess = manageSessions.get(k)
         if (!sess?.targetId) return interaction.update({ content: 'Sesja zarządzania wygasła.', components: [] })
-
         const entry = { userId: sess.targetId, cls, sp, isAlt: false }
-        pushEntry(state, entry)
-        promoteFromReserve(state)
-        await rerender(interaction, state)
-        saveStateDebounced()
+        pushEntry(state, entry); promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
         manageSessions.delete(k)
         return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(cls)} SP ${sp} ✅`, components: [] })
       }
@@ -605,42 +517,33 @@ client.on('interactionCreate', async interaction => {
         state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
       }
       const entry = { userId, cls, sp, isAlt: kind === 'alt' }
-      pushEntry(state, entry)
-      promoteFromReserve(state)
-      await rerender(interaction, state)
-      saveStateDebounced()
+      pushEntry(state, entry); promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
       return interaction.update({ content: 'Zapisano ✅', components: [] })
     }
   }
 
   // User Select (manage add/remove/setleader)
   if (interaction.isUserSelectMenu()) {
-    const parts = interaction.customId.split(':') // raid:<panelId>:pickuser:add|remove|setleader
+    const parts = interaction.customId.split(':') // raid:<anyId>:pickuser:add|remove|setleader
     if (parts[0] !== 'raid') return
-    const panelId = parts[1]
+    const anyId = parts[1]
     const mode = parts[2] === 'pickuser' ? parts[3] : null
-
-    const state = raids.get(panelId)
+    const state = getStateByAnyId(anyId)
     if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
     if (interaction.user.id !== state.meta.leaderId) return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
 
     const targetId = interaction.values[0]
 
     if (mode === 'add') {
-      const k = sessionKey(interaction, panelId)
+      const k = sessionKey(interaction, anyId)
       manageSessions.set(k, { mode: 'add', targetId })
-      return interaction.update({
-        content: `Dodawanie: <@${targetId}>\nWybierz klasę:`,
-        components: [classSelect(panelId, 'madd')]
-      })
+      return interaction.update({ content: `Dodawanie: <@${targetId}>\nWybierz klasę:`, components: [classSelect(anyId, 'madd')] })
     }
 
     if (mode === 'remove') {
       const before = JSON.stringify({ main: state.main, reserve: state.reserve })
-      removeAllUser(state, targetId, { onlyAlts: false })
-      promoteFromReserve(state)
-      await rerender(interaction, state)
-      saveStateDebounced()
+      removeAllUser(state, targetId, { onlyAlts: false }); promoteFromReserve(state)
+      await rerender(interaction, state); saveStateDebounced()
       const changed = JSON.stringify({ main: state.main, reserve: state.reserve }) !== before
       if (changed) await interaction.channel.send(`🗑️ <@${targetId}> usunięty przez lidera — ${fmtNowPL()}.`)
       return interaction.update({ content: changed ? 'Usunięto ✅' : 'Użytkownik nie był zapisany.', components: [] })
@@ -649,8 +552,7 @@ client.on('interactionCreate', async interaction => {
     if (mode === 'setleader') {
       state.meta.leaderId = targetId
       state.meta.leaderMention = `<@${targetId}>`
-      await rerenderById(interaction.channel, state)
-      saveStateDebounced()
+      await rerenderById(interaction.channel, state); saveStateDebounced()
       await interaction.channel.send(`👑 Nowy lider rajdu: <@${targetId}> — ${fmtNowPL()}.`)
       return interaction.update({ content: 'Zmieniono lidera ✅', components: [] })
     }
@@ -658,10 +560,10 @@ client.on('interactionCreate', async interaction => {
 
   // Modal submit: zmiana terminu
   if (interaction.isModalSubmit()) {
-    const parts = interaction.customId.split(':') // raid:<panelId>:modal:setdate
+    const parts = interaction.customId.split(':') // raid:<anyId>:modal:setdate
     if (parts[0] !== 'raid' || parts[2] !== 'modal' || parts[3] !== 'setdate') return
-    const panelId = parts[1]
-    const state = raids.get(panelId)
+    const anyId = parts[1]
+    const state = getStateByAnyId(anyId)
     if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
     if (interaction.user.id !== state.meta.leaderId) return interaction.reply({ content: 'Tylko lider może zmieniać termin.', ephemeral: true })
 
@@ -673,8 +575,7 @@ client.on('interactionCreate', async interaction => {
     state.meta.timeText = timeText
     state.meta.startAt = startAtDate ? startAtDate.getTime() : undefined
 
-    await rerenderById(interaction.channel, state)
-    saveStateDebounced()
+    await rerenderById(interaction.channel, state); saveStateDebounced()
     await interaction.channel.send(`🗓️ Lider zaktualizował termin rajdu na **${dateText} ${timeText}** — ${fmtNowPL()}.`)
     return interaction.reply({ content: 'Zmieniono termin ✅', ephemeral: true })
   }
@@ -682,4 +583,3 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
-

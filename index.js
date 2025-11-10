@@ -3,6 +3,7 @@ require('dotenv').config()
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const http = require('http')
 const {
   Client,
   GatewayIntentBits,
@@ -21,14 +22,32 @@ const {
   TextInputStyle,
 } = require('discord.js')
 
+// ─────────────────────────── Client (ograniczony cache) ───────────────────────────
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-  partials: [Partials.Channel, Partials.Message]
+  intents: [GatewayIntentBits.Guilds], // wystarczy do slashy i edycji embeda
+  partials: [Partials.Channel, Partials.Message],
+  sweepers: {
+    messages: {
+      interval: 300,  // co 5 min
+      lifetime: 900,  // starsze niż 15 min wylatują z cache
+    }
+  }
 })
 
 // ─────────────────────────── Stan ───────────────────────────
 const raids = new Map() // Map<panelId, State>
 const genPanelId = () => crypto.randomUUID()
+
+// muteks per panel (prosty kolejkujący lock)
+const locks = new Map()
+async function withLock(key, fn) {
+  const prev = locks.get(key) || Promise.resolve()
+  let unlock
+  const p = new Promise(res => (unlock = res))
+  locks.set(key, prev.then(() => p))
+  try { return await fn() }
+  finally { unlock(); if (locks.get(key) === p) locks.delete(key) }
+}
 
 // ─────────────────────────── Trwałość ───────────────────────────
 const DATA_PATH = process.env.RAIDS_PATH || path.join(__dirname, 'raids.json')
@@ -51,8 +70,7 @@ function parsePolishDate(dateText, timeText) {
     'listopada': 11, 'listopad': 11,
     'grudnia': 12, 'grudzien': 12, 'grudzień': 12
   }
-  const d = norm(dateText)
-  const t = norm(timeText)
+  const d = norm(dateText), t = norm(timeText)
 
   let day, month, year
   const num = d.match(/(\d{1,2})\s+(\d{1,2})\s+(\d{4})/)
@@ -83,13 +101,14 @@ function loadState() {
     const raw = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'))
     for (const [panelId, s] of Object.entries(raw)) {
       const state = {
+        panelId,
         capacity: s.capacity,
         main: s.main || [],
         reserve: s.reserve || [],
-        meta: s.meta,
+        meta: s.meta || {},
         channelId: s.channelId || null,
         messageId: s.messageId || null,
-        guildId: s.guildId || null
+        guildId: s.guildId || null,
       }
       if (!state.meta.startAt) {
         const d = parsePolishDate(state.meta.dateText, state.meta.timeText)
@@ -135,9 +154,7 @@ function classEmojiName(cls) {
   if (cls === 'MSW') return 'Msw'
   return null
 }
-function spEmojiName(cls, sp) {
-  return `sp${sp}${CLASS_TO_TOKEN[cls] || 'lucznik'}`
-}
+function spEmojiName(cls, sp) { return `sp${sp}${CLASS_TO_TOKEN[cls] || 'lucznik'}` }
 
 // ─────────────────────────── Utils ───────────────────────────
 const fmtNowPL = () => new Date().toLocaleString('pl-PL', { timeZone: 'Europe/Warsaw' })
@@ -153,14 +170,11 @@ function humanizeDelta(ms) {
   if (m || (!d && !h)) parts.push(`${m}m`)
   return sign > 0 ? `za ${parts.join(' ')}` : `${parts.join(' ')} temu`
 }
-
 function classEmoji(guild, cls) {
   const name = classEmojiName(cls)
   return name ? emStr(guild, name) : ''
 }
-function spEmoji(guild, cls, sp) {
-  return emStr(guild, spEmojiName(cls, sp))
-}
+function spEmoji(guild, cls, sp) { return emStr(guild, spEmojiName(cls, sp)) }
 function equipmentBlock(guild) {
   return (
     '**Wyposażenie:**\n' +
@@ -178,23 +192,20 @@ function userLine(guild, entry, index) {
   const alt   = entry.isAlt ? ' (Alt)' : ''
   return `${index}. ${tag} ${clsEm} [${entry.cls}] ${spEm} [SP ${entry.sp}]${alt}`
 }
-
-// fallback: znajdź stan także po messageId (stare panele)
 function getStateByAnyId(anyId) {
   if (raids.has(anyId)) return raids.get(anyId)
-  for (const [, st] of raids.entries()) {
-    if (st && st.messageId === anyId) return st
-  }
+  for (const [, st] of raids.entries()) if (st && st.messageId === anyId) return st
   return null
 }
 
 // ─────────────────────────── Render ───────────────────────────
 function buildEmbed(guild, { meta, main, reserve, capacity }) {
-  const { leaderMention, raidName, dateText, timeText, duration, requirements } = meta
+  const { leaderMention, raidName, dateText, timeText, duration, requirements, closed } = meta
   const head =
     `**Lider:** ${leaderMention}\n` +
     `**Co:**\n${raidName}\n\n` +
     `**Kiedy:** ${dateText} ${timeText} [${duration}]\n` +
+    (closed ? '**[Zapisy zamknięte]**\n' : '') +
     '──────────────────────────────\n'
   const reqAndEquip =
     `**Wymogi:**\n${requirements}\n` +
@@ -218,39 +229,18 @@ function buildEmbed(guild, { meta, main, reserve, capacity }) {
     )
 }
 
-// edycja bez fetch, gdy to ta sama wiadomość
-async function rerender(interaction, state) {
-  if (!state) return
-  const guild = interaction.guild ?? client.guilds.cache.get(state.guildId)
-  const newEmbed = buildEmbed(guild, { meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
-  if (interaction.message && interaction.message.id === state.messageId) {
-    await interaction.message.edit({ embeds: [newEmbed] })
-    return
-  }
-  const msg = await interaction.channel.messages.fetch(state.messageId)
-  await msg.edit({ embeds: [newEmbed] })
-}
-async function rerenderById(channel, state) {
-  if (!state) return
-  const guild = channel.guild ?? client.guilds.cache.get(state.guildId)
-  const msg = await channel.messages.fetch(state.messageId)
-  const newEmbed = buildEmbed(guild, { meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
-  await msg.edit({ embeds: [newEmbed] })
-}
-
-// ─────────────────────────── Komponenty ───────────────────────────
-function buttonsRow(panelId) {
+function buttonsRow(panelId, closed = false) {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`raid:${panelId}:signup`).setLabel('Zapisz się / Zmień SP').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`raid:${panelId}:signout`).setLabel('Wypisz się').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`raid:${panelId}:signup`).setLabel('Zapisz się / Zmień SP').setStyle(ButtonStyle.Success).setDisabled(closed),
+    new ButtonBuilder().setCustomId(`raid:${panelId}:signout`).setLabel('Wypisz się').setStyle(ButtonStyle.Danger).setDisabled(closed),
     new ButtonBuilder().setCustomId(`raid:${panelId}:help`).setLabel('Pomoc').setStyle(ButtonStyle.Secondary),
   )
 }
-function altButtonsRow(panelId) {
+function altButtonsRow(panelId, closed = false) {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`raid:${panelId}:signup_alt`).setLabel('Zapisz Alta').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`raid:${panelId}:leave_alts`).setLabel('Usuń Alty').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`raid:${panelId}:signout_all`).setLabel('Wypisz (Wszystko)').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`raid:${panelId}:signup_alt`).setLabel('Zapisz Alta').setStyle(ButtonStyle.Primary).setDisabled(closed),
+    new ButtonBuilder().setCustomId(`raid:${panelId}:leave_alts`).setLabel('Usuń Alty').setStyle(ButtonStyle.Secondary).setDisabled(closed),
+    new ButtonBuilder().setCustomId(`raid:${panelId}:signout_all`).setLabel('Wypisz (Wszystko)').setStyle(ButtonStyle.Danger).setDisabled(closed),
   )
 }
 function manageRow(panelId) {
@@ -264,19 +254,24 @@ function managePanelRow(panelId) {
     new ButtonBuilder().setCustomId(`raid:${panelId}:m_remove`).setLabel('Usuń osobę').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId(`raid:${panelId}:m_setdate`).setLabel('Zmień termin').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`raid:${panelId}:m_setleader`).setLabel('Zmień lidera').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`raid:${panelId}:m_ping`).setLabel('Oznacz zapisanych').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`raid:${panelId}:m_promote`).setLabel('Do składu').setStyle(ButtonStyle.Primary),
   )
 }
+function managePanelRow2(panelId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`raid:${panelId}:m_demote`).setLabel('Do rezerwy').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`raid:${panelId}:m_ping`).setLabel('Oznacz zapisanych').setStyle(ButtonStyle.Secondary),
+  )
+}
+
 function classSelect(panelId, kind, guild) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`raid:${panelId}:pickclass:${kind}`)
       .setPlaceholder('Wybierz klasę')
       .addOptions(
-        ['Łucznik', 'Wojownik', 'Mag', 'MSW'].map(c => ({
-          label: c,
-          value: c,
-          emoji: emObj(guild, classEmojiName(c))
+        CLASS_OPTIONS.map(c => ({
+          label: c, value: c, emoji: emObj(guild, classEmojiName(c))
         }))
       )
   )
@@ -285,11 +280,7 @@ function spSelect(panelId, kind, cls, guild) {
   const count = cls === 'MSW' ? 7 : 11
   const options = Array.from({ length: count }, (_, i) => {
     const n = i + 1
-    return {
-      label: `SP ${n}`,
-      value: String(n),
-      emoji: emObj(guild, spEmojiName(cls, n))
-    }
+    return { label: `SP ${n}`, value: String(n), emoji: emObj(guild, spEmojiName(cls, n)) }
   })
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -299,17 +290,46 @@ function spSelect(panelId, kind, cls, guild) {
   )
 }
 
+// ─────────────────────────── Szablony ───────────────────────────
+const TEMPLATES = {
+  ZTS: {
+    raidName: 'ZTS – Zapasowy Twardy Szturm',
+    requirements: '90+ Lv, SP +13, rezisty 90+, DPS/Gra w roli',
+    duration: '1h30m',
+  },
+  GLACERNON: {
+    raidName: 'Glacernon',
+    requirements: '100+ Lv, rezisty lodu, SP defensywne na bossy',
+    duration: '2h',
+  },
+  PTS: {
+    raidName: 'PTS – Piekielny Twardy Szturm',
+    requirements: '95+ Lv, SP +15, DPS/FULL buff, obeznanie z mechaniką',
+    duration: '1h45m',
+  }
+}
+
 // ─────────────────────────── /raid ───────────────────────────
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
+  .addStringOption(o =>
+    o.setName('szablon')
+     .setDescription('Opcjonalny szablon rajdu')
+     .addChoices(
+       { name: 'ZTS', value: 'ZTS' },
+       { name: 'Glacernon', value: 'GLACERNON' },
+       { name: 'PTS', value: 'PTS' }
+     )
+     .setRequired(false)
+  )
   .addUserOption(o => o.setName('lider').setDescription('Lider rajdu').setRequired(true))
   .addStringOption(o => o.setName('jaki_raid').setDescription('Jaki rajd').setRequired(true))
-  .addStringOption(o => o.setName('wymogi').setDescription('Wymogi (np. C90').setRequired(true))
+  .addStringOption(o => o.setName('wymogi').setDescription('Wymogi').setRequired(true))
   .addIntegerOption(o => o.setName('ilosc_slotow').setDescription('Ilość miejsc').setMinValue(1).setMaxValue(40).setRequired(true))
-  .addStringOption(o => o.setName('data').setDescription('Data (np. 11.11.2025)').setRequired(true))
+  .addStringOption(o => o.setName('data').setDescription('Data (np. Wtorek, 11 listopada 2025 / 11.11.2025)').setRequired(true))
   .addStringOption(o => o.setName('godzina').setDescription('Godzina (np. 21:00)').setRequired(true))
-  .addStringOption(o => o.setName('czas_trwania').setDescription('Czas trwania (np. 1H)').setRequired(true))
+  .addStringOption(o => o.setName('czas_trwania').setDescription('Czas trwania (np. 1h)').setRequired(true))
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN)
@@ -324,6 +344,28 @@ client.once('ready', async () => {
   console.log(`Zalogowano jako ${client.user.tag}`)
   try { await registerCommands() } catch (e) { console.error('Rejestracja komend nie powiodła się:', e) }
   loadState()
+  // watchdog auto-close co 60s
+  setInterval(async () => {
+    const now = Date.now()
+    for (const [, state] of raids) {
+      const start = state.meta?.startAt
+      if (!state.meta?.closed && typeof start === 'number' && now >= (start + 10 * 60 * 1000)) {
+        state.meta.closed = true
+        // spróbuj zaktualizować komponenty
+        try {
+          const guild = client.guilds.cache.get(state.guildId)
+          const channel = guild?.channels?.cache?.get(state.channelId) || (await client.channels.fetch(state.channelId))
+          const msg = await channel.messages.fetch(state.messageId)
+          const newEmbed = buildEmbed(guild, state)
+          await msg.edit({
+            embeds: [newEmbed],
+            components: [buttonsRow(state.panelId, true), altButtonsRow(state.panelId, true), manageRow(state.panelId)]
+          })
+          saveStateDebounced()
+        } catch { /* ignore w tle */ }
+      }
+    }
+  }, 60 * 1000)
 })
 
 // ─────────────────────────── Tworzenie rajdu ───────────────────────────
@@ -331,23 +373,21 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return
   if (interaction.commandName !== 'raid') return
 
-  // sprawdzamy role
-  const REQUIRED_ROLE = process.env.RAID_ROLE_ID  // w .env dajesz ID roli
-
-  if (!interaction.member.roles.cache.has(REQUIRED_ROLE)) {
-    return interaction.reply({
-      ephemeral: true,
-      content: '❌ Nie masz uprawnień do użycia tej komendy.'
-    })
-  }
-
+  const templateKey = interaction.options.getString('szablon')
   const leader = interaction.options.getUser('lider')
-  const raidName = interaction.options.getString('jaki_raid')
-  const requirements = interaction.options.getString('wymogi')
+  let raidName = interaction.options.getString('jaki_raid')
+  let requirements = interaction.options.getString('wymogi')
+  let duration = interaction.options.getString('czas_trwania')
   const capacity = interaction.options.getInteger('ilosc_slotow')
   const dateText = interaction.options.getString('data')
   const timeText = interaction.options.getString('godzina')
-  const duration = interaction.options.getString('czas_trwania')
+
+  if (templateKey && TEMPLATES[templateKey]) {
+    const t = TEMPLATES[templateKey]
+    raidName = t.raidName
+    requirements = t.requirements
+    duration = t.duration
+  }
 
   const startAtDate = parsePolishDate(dateText, timeText)
   const startAt = startAtDate ? startAtDate.getTime() : undefined
@@ -360,15 +400,20 @@ client.on('interactionCreate', async interaction => {
     dateText,
     timeText,
     duration,
-    startAt
+    startAt,
+    closed: false,
   }
 
   const panelId = genPanelId()
   const embed = buildEmbed(interaction.guild, { meta, main: [], reserve: [], capacity })
-  await interaction.reply({ embeds: [embed], components: [buttonsRow(panelId), altButtonsRow(panelId), manageRow(panelId)] })
+  await interaction.reply({
+    embeds: [embed],
+    components: [buttonsRow(panelId, false), altButtonsRow(panelId, false), manageRow(panelId)]
+  })
   const sent = await interaction.fetchReply()
 
   raids.set(panelId, {
+    panelId,
     capacity,
     main: [],
     reserve: [],
@@ -386,257 +431,411 @@ function removeAllUser(state, userId, { onlyAlts = false } = {}) {
   state.main = state.main.filter(filt)
   state.reserve = state.reserve.filter(filt)
 }
-function pushEntry(state, entry) { (state.main.length < state.capacity ? state.main : state.reserve).push(entry) }
-function promoteFromReserve(state) { while (state.main.length < state.capacity && state.reserve.length > 0) state.main.push(state.reserve.shift()) }
+function pushEntry(state, entry) {
+  if (state.main.length < state.capacity) state.main.push(entry)
+  else state.reserve.push(entry)
+}
+function promoteFromReserve(state) {
+  while (state.main.length < state.capacity && state.reserve.length > 0) {
+    state.main.push(state.reserve.shift())
+  }
+}
+async function rerender(interaction, state) {
+  const guild = interaction.guild ?? client.guilds.cache.get(state.guildId)
+  const newEmbed = buildEmbed(guild, state)
+  if (interaction.message && interaction.message.id === state.messageId) {
+    await interaction.message.edit({
+      embeds: [newEmbed],
+      components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
+    })
+    return
+  }
+  const msg = await interaction.channel.messages.fetch(state.messageId)
+  await msg.edit({
+    embeds: [newEmbed],
+    components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
+  })
+}
+async function rerenderById(channel, state) {
+  const guild = channel.guild ?? client.guilds.cache.get(state.guildId)
+  const msg = await channel.messages.fetch(state.messageId)
+  const newEmbed = buildEmbed(guild, state)
+  await msg.edit({
+    embeds: [newEmbed],
+    components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
+  })
+}
 
 // ─────────────────────────── Handlery UI ───────────────────────────
 const manageSessions = new Map()
 const sessionKey = (i, panelId) => `${i.user.id}_${panelId}`
+const MAX_ALTS = 3
 
 client.on('interactionCreate', async interaction => {
-  // Buttons
-  if (interaction.isButton()) {
-    const [prefix, anyId, action] = interaction.customId.split(':')
-    if (prefix !== 'raid') return
-    const state = getStateByAnyId(anyId)
-    if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
-    const panelId = anyId
-
-    const userId = interaction.user.id
-    const isLeader = userId === state.meta.leaderId
-
-    if (action === 'help') {
-      return interaction.reply({
-        ephemeral: true,
-        content:
-          '📌 **Jak to działa**\n' +
-          '• **Zapisz się / Zmień SP** – wybierz klasę i SP; jeśli brak miejsc, trafisz do rezerwy.\n' +
-          '• **Wypisz się** – usuwa Twoje główne konto (alty zostają).\n' +
-          '• **Zapisz Alta** – dodaje konto Alt z klasą i SP.\n' +
-          '• **Usuń Alty** – usuwa wszystkie Twoje alty.\n' +
-          '• **Wypisz (Wszystko)** – usuwa i główne konto, i alty.\n' +
-          '• **Zarządzaj** (lider): Dodaj/Usuń, Zmień termin, Zmień lidera, Oznacz zapisanych.'
-      })
-    }
-
-    if (action === 'signout') {
-      const before = JSON.stringify({ main: state.main, reserve: state.reserve })
-      state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
-      state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
-      if (JSON.stringify({ main: state.main, reserve: state.reserve }) !== before) {
-        await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtNowPL()}.`)
-      }
-      promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
-      return interaction.deferUpdate()
-    }
-
-    if (action === 'signout_all') {
-      const hadAny = state.main.some(e => e.userId === userId) || state.reserve.some(e => e.userId === userId)
-      removeAllUser(state, userId, { onlyAlts: false })
-      if (hadAny) await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtNowPL()}.`)
-      promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
-      return interaction.deferUpdate()
-    }
-
-    if (action === 'leave_alts') {
-      const hadAlts = state.main.some(e => e.userId === userId && e.isAlt) || state.reserve.some(e => e.userId === userId && e.isAlt)
-      removeAllUser(state, userId, { onlyAlts: true })
-      if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`)
-      promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
-      return interaction.deferUpdate()
-    }
-
-    if (action === 'signup' || action === 'signup_alt') {
-      const kind = action === 'signup_alt' ? 'alt' : 'main'
-      return interaction.reply({
-        ephemeral: true,
-        content: 'Wybierz klasę:',
-        components: [classSelect(panelId, kind, interaction.guild)]
-      })
-    }
-
-    if (action === 'manage') {
-      if (!isLeader) return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
-      return interaction.reply({ ephemeral: true, content: 'Panel zarządzania:', components: [managePanelRow(panelId)] })
-    }
-
-    if (!isLeader && action.startsWith('m_')) {
-      return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
-    }
-
-    if (action === 'm_add') {
-      const k = sessionKey(interaction, panelId)
-      manageSessions.set(k, { mode: 'add' })
-      return interaction.update({
-        content: 'Wybierz użytkownika do dodania:',
-        components: [new ActionRowBuilder().addComponents(
-          new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:add`).setPlaceholder('Wybierz użytkownika')
-        )]
-      })
-    }
-
-    if (action === 'm_remove') {
-      const k = sessionKey(interaction, panelId)
-      manageSessions.set(k, { mode: 'remove' })
-      return interaction.update({
-        content: 'Wybierz użytkownika do usunięcia:',
-        components: [new ActionRowBuilder().addComponents(
-          new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:remove`).setPlaceholder('Wybierz użytkownika')
-        )]
-      })
-    }
-
-    if (action === 'm_setdate') {
-      const modal = new ModalBuilder()
-        .setCustomId(`raid:${panelId}:modal:setdate`).setTitle('Zmień termin rajdu')
-      const dateInput = new TextInputBuilder().setCustomId('date_text').setLabel('Data (np. 11.11.2025)').setStyle(TextInputStyle.Short).setRequired(true)
-      const timeInput = new TextInputBuilder().setCustomId('time_text').setLabel('Godzina (np. 21:00)').setStyle(TextInputStyle.Short).setRequired(true)
-      modal.addComponents(new ActionRowBuilder().addComponents(dateInput), new ActionRowBuilder().addComponents(timeInput))
-      return interaction.showModal(modal)
-    }
-
-    if (action === 'm_setleader') {
-      return interaction.update({
-        content: 'Wybierz nowego lidera:',
-        components: [new ActionRowBuilder().addComponents(
-          new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:setleader`).setPlaceholder('Wybierz użytkownika')
-        )]
-      })
-    }
-
-    if (action === 'm_ping') {
-      if (!state.meta.startAt) {
-        const d = parsePolishDate(state.meta.dateText, state.meta.timeText)
-        if (d) { state.meta.startAt = d.getTime(); saveStateDebounced() }
-      }
-      const hasStart = typeof state.meta.startAt === 'number'
-      const now = Date.now()
-      const delta = hasStart ? (state.meta.startAt - now) : null
-      const whenTxt = hasStart
-        ? (delta >= 0 ? `Start za ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`
-                      : `Start był ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`)
-        : `Termin: **${state.meta.dateText} ${state.meta.timeText}** (brak pewnego timestampu)`
-
-      const mainIds = [...new Set(state.main.map(e => e.userId))]
-      const resIds  = [...new Set(state.reserve.map(e => e.userId))]
-      const mainMentions = mainIds.length ? mainIds.map(id => `<@${id}>`).join(' ') : '—'
-      const resMentions  = resIds.length ? resIds.map(id => `<@${id}>`).join(' ')  : '—'
-
-      await interaction.channel.send(
-        `📣 **Oznaczenie zapisanych**\n${whenTxt}\n\n` +
-        `**Skład (${state.main.length}/${state.capacity})**: ${mainMentions}\n` +
-        `**Rezerwa (${state.reserve.length})**: ${resMentions}`
-      )
-      return interaction.reply({ content: 'Wysłano oznaczenie ✅', ephemeral: true })
-    }
-    return
-  }
-
-  // String Select (klasa/SP + manage add SP)
-  if (interaction.isStringSelectMenu()) {
-    const parts = interaction.customId.split(':') // raid:<anyId>:pickclass|picksp:...
-    if (parts[0] !== 'raid') return
-    const anyId = parts[1]
-    const state = getStateByAnyId(anyId)
-    if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
-
-    if (parts[2] === 'pickclass') {
-      const kind = parts[3]
-      const cls = interaction.values[0]
-      return interaction.update({
-        content: `Klasa: **${classEmoji(interaction.guild, cls)} ${cls}** – teraz wybierz **SP**:`,
-        components: [spSelect(anyId, kind, cls, interaction.guild)]
-      })
-    }
-
-    if (parts[2] === 'picksp') {
-      const kind = parts[3] // main | alt | madd
-      const cls = parts[4]
-      const sp = Math.min(cls === 'MSW' ? 7 : 11, parseInt(interaction.values[0], 10))
-
-      if (kind === 'madd') {
-        const k = sessionKey(interaction, anyId)
-        const sess = manageSessions.get(k)
-        if (!sess?.targetId) return interaction.update({ content: 'Sesja zarządzania wygasła.', components: [] })
-        const entry = { userId: sess.targetId, cls, sp, isAlt: false }
-        pushEntry(state, entry); promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
-        manageSessions.delete(k)
-        return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(interaction.guild, cls)} SP ${sp} ✅`, components: [] })
-      }
-
+  try {
+    // Buttons
+    if (interaction.isButton()) {
+      const [prefix, anyId, action] = interaction.customId.split(':')
+      if (prefix !== 'raid') return
+      const state = getStateByAnyId(anyId)
+      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      const panelId = state.panelId
       const userId = interaction.user.id
-      if (kind === 'main') {
-        state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
-        state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
+      const isLeader = userId === state.meta.leaderId
+
+      // Blokada zapisów po zamknięciu
+      const isClosed = !!state.meta.closed
+      if (isClosed && ['signup', 'signup_alt', 'signout', 'signout_all', 'leave_alts'].includes(action)) {
+        return interaction.reply({ ephemeral: true, content: '🔒 Zapisy są zamknięte.' })
       }
-      const entry = { userId, cls, sp, isAlt: kind === 'alt' }
-      pushEntry(state, entry); promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
-      return interaction.update({ content: 'Zapisano ✅', components: [] })
+
+      if (action === 'help') {
+        return interaction.reply({
+          ephemeral: true,
+          content:
+            '📌 **Jak to działa**\n' +
+            '• **Zapisz się / Zmień SP** – wybierz klasę i SP; jeśli brak miejsc, trafisz do rezerwy.\n' +
+            '• **Wypisz się** – usuwa Twoje główne konto (alty zostają).\n' +
+            '• **Zapisz Alta** – dodaje konto Alt z klasą i SP (limit 3).\n' +
+            '• **Usuń Alty** – usuwa wszystkie Twoje alty.\n' +
+            '• **Wypisz (Wszystko)** – usuwa i główne konto, i alty.\n' +
+            '• **Zarządzaj** (lider): Dodaj/Usuń, Zmień termin/lidera, Do składu/Do rezerwy, Oznacz zapisanych.'
+        })
+      }
+
+      if (action === 'signout') {
+        await withLock(panelId, async () => {
+          const before = JSON.stringify({ main: state.main, reserve: state.reserve })
+          state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
+          state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
+          if (JSON.stringify({ main: state.main, reserve: state.reserve }) !== before) {
+            await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtNowPL()}.`)
+          }
+          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
+        })
+        return interaction.deferUpdate()
+      }
+
+      if (action === 'signout_all') {
+        await withLock(panelId, async () => {
+          const hadAny = state.main.some(e => e.userId === userId) || state.reserve.some(e => e.userId === userId)
+          removeAllUser(state, userId, { onlyAlts: false })
+          if (hadAny) await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtNowPL()}.`)
+          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
+        })
+        return interaction.deferUpdate()
+      }
+
+      if (action === 'leave_alts') {
+        await withLock(panelId, async () => {
+          const hadAlts = state.main.concat(state.reserve).some(e => e.userId === userId && e.isAlt)
+          removeAllUser(state, userId, { onlyAlts: true })
+          if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`)
+          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
+        })
+        return interaction.deferUpdate()
+      }
+
+      if (action === 'signup' || action === 'signup_alt') {
+        if (action === 'signup_alt') {
+          // limit altów 3
+          const altsCount = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt).length
+          if (altsCount >= MAX_ALTS) {
+            return interaction.reply({ ephemeral: true, content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).` })
+          }
+        }
+        const kind = action === 'signup_alt' ? 'alt' : 'main'
+        return interaction.reply({
+          ephemeral: true,
+          content: 'Wybierz klasę:',
+          components: [classSelect(panelId, kind, interaction.guild)]
+        })
+      }
+
+      if (action === 'manage') {
+        if (!isLeader) return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
+        return interaction.reply({
+          ephemeral: true,
+          content: 'Panel zarządzania:',
+          components: [managePanelRow(panelId), managePanelRow2(panelId)]
+        })
+      }
+
+      if (!isLeader && action.startsWith('m_')) {
+        return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
+      }
+
+      if (action === 'm_add') {
+        const k = sessionKey(interaction, panelId)
+        manageSessions.set(k, { mode: 'add' })
+        return interaction.update({
+          content: 'Wybierz użytkownika do dodania:',
+          components: [new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:add`).setPlaceholder('Wybierz użytkownika')
+          )]
+        })
+      }
+
+      if (action === 'm_remove') {
+        const k = sessionKey(interaction, panelId)
+        manageSessions.set(k, { mode: 'remove' })
+        return interaction.update({
+          content: 'Wybierz użytkownika do usunięcia:',
+          components: [new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:remove`).setPlaceholder('Wybierz użytkownika')
+          )]
+        })
+      }
+
+      if (action === 'm_setdate') {
+        const modal = new ModalBuilder()
+          .setCustomId(`raid:${panelId}:modal:setdate`).setTitle('Zmień termin rajdu')
+        const dateInput = new TextInputBuilder().setCustomId('date_text').setLabel('Data (np. 11.11.2025)').setStyle(TextInputStyle.Short).setRequired(true)
+        const timeInput = new TextInputBuilder().setCustomId('time_text').setLabel('Godzina (np. 21:00)').setStyle(TextInputStyle.Short).setRequired(true)
+        modal.addComponents(new ActionRowBuilder().addComponents(dateInput), new ActionRowBuilder().addComponents(timeInput))
+        return interaction.showModal(modal)
+      }
+
+      if (action === 'm_setleader') {
+        return interaction.update({
+          content: 'Wybierz nowego lidera:',
+          components: [new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:setleader`).setPlaceholder('Wybierz użytkownika')
+          )]
+        })
+      }
+
+      if (action === 'm_promote') {
+        const k = sessionKey(interaction, panelId)
+        manageSessions.set(k, { mode: 'promote' })
+        return interaction.update({
+          content: 'Wybierz użytkownika do przeniesienia **do składu**:',
+          components: [new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:promote`).setPlaceholder('Wybierz użytkownika z rezerwy')
+          )]
+        })
+      }
+
+      if (action === 'm_demote') {
+        const k = sessionKey(interaction, panelId)
+        manageSessions.set(k, { mode: 'demote' })
+        return interaction.update({
+          content: 'Wybierz użytkownika do przeniesienia **do rezerwy**:',
+          components: [new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId(`raid:${panelId}:pickuser:demote`).setPlaceholder('Wybierz użytkownika ze składu')
+          )]
+        })
+      }
+
+      if (action === 'm_ping') {
+        if (!state.meta.startAt) {
+          const d = parsePolishDate(state.meta.dateText, state.meta.timeText)
+          if (d) { state.meta.startAt = d.getTime(); saveStateDebounced() }
+        }
+        const hasStart = typeof state.meta.startAt === 'number'
+        const now = Date.now()
+        const delta = hasStart ? (state.meta.startAt - now) : null
+        const whenTxt = hasStart
+          ? (delta >= 0 ? `Start za ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`
+                        : `Start był ${humanizeDelta(delta)} (**${state.meta.dateText} ${state.meta.timeText}**)`)
+          : `Termin: **${state.meta.dateText} ${state.meta.timeText}** (brak pewnego timestampu)`
+
+        const mainIds = [...new Set(state.main.map(e => e.userId))]
+        const resIds  = [...new Set(state.reserve.map(e => e.userId))]
+        const mainMentions = mainIds.length ? mainIds.map(id => `<@${id}>`).join(' ') : '—'
+        const resMentions  = resIds.length ? resIds.map(id => `<@${id}>`).join(' ')  : '—'
+
+        await interaction.channel.send(
+          `📣 **Oznaczenie zapisanych**\n${whenTxt}\n\n` +
+          `**Skład (${state.main.length}/${state.capacity})**: ${mainMentions}\n` +
+          `**Rezerwa (${state.reserve.length})**: ${resMentions}`
+        )
+        return interaction.reply({ content: 'Wysłano oznaczenie ✅', ephemeral: true })
+      }
+
+      return
     }
-  }
 
-  // User Select (manage add/remove/setleader)
-  if (interaction.isUserSelectMenu()) {
-    const parts = interaction.customId.split(':') // raid:<anyId>:pickuser:add|remove|setleader
-    if (parts[0] !== 'raid') return
-    const anyId = parts[1]
-    const mode = parts[2] === 'pickuser' ? parts[3] : null
-    const state = getStateByAnyId(anyId)
-    if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
-    if (interaction.user.id !== state.meta.leaderId) return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
+    // String Select (klasa/SP + manage add SP)
+    if (interaction.isStringSelectMenu()) {
+      const parts = interaction.customId.split(':') // raid:<anyId>:pickclass|picksp:...
+      if (parts[0] !== 'raid') return
+      const anyId = parts[1]
+      const state = getStateByAnyId(anyId)
+      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
 
-    const targetId = interaction.values[0]
+      if (parts[2] === 'pickclass') {
+        const kind = parts[3]
+        const cls = interaction.values[0]
+        return interaction.update({
+          content: `Klasa: **${classEmoji(interaction.guild, cls)} ${cls}** – teraz wybierz **SP**:`,
+          components: [spSelect(anyId, kind, cls, interaction.guild)]
+        })
+      }
 
-    if (mode === 'add') {
-      const k = sessionKey(interaction, anyId)
-      manageSessions.set(k, { mode: 'add', targetId })
-      return interaction.update({ content: `Dodawanie: <@${targetId}>\nWybierz klasę:`, components: [classSelect(anyId, 'madd', interaction.guild)] })
+      if (parts[2] === 'picksp') {
+        const kind = parts[3] // main | alt | madd
+        const cls = parts[4]
+        const sp = Math.min(cls === 'MSW' ? 7 : 11, parseInt(interaction.values[0], 10))
+
+        // modyfikacje stanu w locku
+        await withLock(state.panelId, async () => {
+          if (kind === 'madd') {
+            const k = sessionKey(interaction, anyId)
+            const sess = manageSessions.get(k)
+            if (!sess?.targetId) return interaction.update({ content: 'Sesja zarządzania wygasła.', components: [] })
+
+            // nadpisywanie duplikatów main
+            state.main = state.main.filter(e => !(e.userId === sess.targetId && !e.isAlt))
+            state.reserve = state.reserve.filter(e => !(e.userId === sess.targetId && !e.isAlt))
+
+            const entry = { userId: sess.targetId, cls, sp, isAlt: false }
+            pushEntry(state, entry); promoteFromReserve(state)
+            await rerender(interaction, state); saveStateDebounced()
+            manageSessions.delete(k)
+            return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(interaction.guild, cls)} SP ${sp} ✅`, components: [] })
+          }
+
+          const userId = interaction.user.id
+          if (kind === 'main') {
+            // nadpisz poprzedni main tego usera
+            state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
+            state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
+            pushEntry(state, { userId, cls, sp, isAlt: false })
+          } else {
+            // ALT: limit 3 i brak identycznych duplikatów
+            const altsList = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt)
+            if (altsList.length >= MAX_ALTS) {
+              return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
+            }
+            const duplicate = altsList.some(e => e.cls === cls && e.sp === sp)
+            if (duplicate) {
+              return interaction.update({ content: '⚠️ Taki sam ALT (klasa+SP) już jest zapisany.', components: [] })
+            }
+            pushEntry(state, { userId, cls, sp, isAlt: true })
+          }
+
+          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
+          return interaction.update({ content: 'Zapisano ✅', components: [] })
+        })
+      }
     }
 
-    if (mode === 'remove') {
-      const before = JSON.stringify({ main: state.main, reserve: state.reserve })
-      removeAllUser(state, targetId, { onlyAlts: false }); promoteFromReserve(state)
-      await rerender(interaction, state); saveStateDebounced()
-      const changed = JSON.stringify({ main: state.main, reserve: state.reserve }) !== before
-      if (changed) await interaction.channel.send(`🗑️ <@${targetId}> usunięty przez lidera — ${fmtNowPL()}.`)
-      return interaction.update({ content: changed ? 'Usunięto ✅' : 'Użytkownik nie był zapisany.', components: [] })
+    // User Select (manage add/remove/setleader/promote/demote)
+    if (interaction.isUserSelectMenu()) {
+      const parts = interaction.customId.split(':') // raid:<anyId>:pickuser:add|remove|setleader|promote|demote
+      if (parts[0] !== 'raid') return
+      const anyId = parts[1]
+      const mode = parts[2] === 'pickuser' ? parts[3] : null
+      const state = getStateByAnyId(anyId)
+      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      if (interaction.user.id !== state.meta.leaderId) return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
+
+      const targetId = interaction.values[0]
+
+      await withLock(state.panelId, async () => {
+        if (mode === 'add') {
+          const k = sessionKey(interaction, anyId)
+          manageSessions.set(k, { mode: 'add', targetId })
+          return interaction.update({ content: `Dodawanie: <@${targetId}>\nWybierz klasę:`, components: [classSelect(anyId, 'madd', interaction.guild)] })
+        }
+
+        if (mode === 'remove') {
+          const before = JSON.stringify({ main: state.main, reserve: state.reserve })
+          removeAllUser(state, targetId, { onlyAlts: false })
+          promoteFromReserve(state)
+          await rerender(interaction, state); saveStateDebounced()
+          const changed = JSON.stringify({ main: state.main, reserve: state.reserve }) !== before
+          if (changed) await interaction.channel.send(`🗑️ <@${targetId}> usunięty przez lidera — ${fmtNowPL()}.`)
+          return interaction.update({ content: changed ? 'Usunięto ✅' : 'Użytkownik nie był zapisany.', components: [] })
+        }
+
+        if (mode === 'setleader') {
+          state.meta.leaderId = targetId
+          state.meta.leaderMention = `<@${targetId}>`
+          await rerenderById(interaction.channel, state); saveStateDebounced()
+          await interaction.channel.send(`👑 Nowy lider rajdu: <@${targetId}> — ${fmtNowPL()}.`)
+          return interaction.update({ content: 'Zmieniono lidera ✅', components: [] })
+        }
+
+        if (mode === 'promote') {
+          // z rezerwy do składu (jeśli pełny skład -> ostatni z main do rezerwy)
+          const idxRes = state.reserve.findIndex(e => e.userId === targetId)
+          if (idxRes === -1) return interaction.update({ content: 'Użytkownik nie jest w rezerwie.', components: [] })
+          const entry = state.reserve.splice(idxRes, 1)[0]
+          if (state.main.length >= state.capacity) {
+            // zrzucamy ostatniego do rezerwy
+            const bumped = state.main.pop()
+            state.reserve.unshift(bumped)
+          }
+          state.main.push(entry)
+          await rerender(interaction, state); saveStateDebounced()
+          return interaction.update({ content: `Przeniesiono <@${targetId}> do **składu** ✅`, components: [] })
+        }
+
+        if (mode === 'demote') {
+          // ze składu do rezerwy
+          const idxMain = state.main.findIndex(e => e.userId === targetId)
+          if (idxMain === -1) return interaction.update({ content: 'Użytkownik nie jest w składzie.', components: [] })
+          const entry = state.main.splice(idxMain, 1)[0]
+          state.reserve.unshift(entry) // na początek rezerwy
+          promoteFromReserve(state) // tylko jeśli jest luka
+          await rerender(interaction, state); saveStateDebounced()
+          return interaction.update({ content: `Przeniesiono <@${targetId}> do **rezerwy** ✅`, components: [] })
+        }
+      })
     }
 
-    if (mode === 'setleader') {
-      state.meta.leaderId = targetId
-      state.meta.leaderMention = `<@${targetId}>`
-      await rerenderById(interaction.channel, state); saveStateDebounced()
-      await interaction.channel.send(`👑 Nowy lider rajdu: <@${targetId}> — ${fmtNowPL()}.`)
-      return interaction.update({ content: 'Zmieniono lidera ✅', components: [] })
+    // Modal submit: zmiana terminu
+    if (interaction.isModalSubmit()) {
+      const parts = interaction.customId.split(':') // raid:<anyId>:modal:setdate
+      if (parts[0] !== 'raid' || parts[2] !== 'modal' || parts[3] !== 'setdate') return
+      const anyId = parts[1]
+      const state = getStateByAnyId(anyId)
+      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      if (interaction.user.id !== state.meta.leaderId) return interaction.reply({ content: 'Tylko lider może zmieniać termin.', ephemeral: true })
+
+      const dateText = interaction.fields.getTextInputValue('date_text')
+      const timeText = interaction.fields.getTextInputValue('time_text')
+      const startAtDate = parsePolishDate(dateText, timeText)
+
+      await withLock(state.panelId, async () => {
+        state.meta.dateText = dateText
+        state.meta.timeText = timeText
+        state.meta.startAt = startAtDate ? startAtDate.getTime() : undefined
+        // po zmianie terminu zdejmujemy auto-closed (otwieramy zapisy ponownie)
+        state.meta.closed = false
+        await rerenderById(interaction.channel, state); saveStateDebounced()
+        await interaction.channel.send(`🗓️ Lider zaktualizował termin rajdu na **${dateText} ${timeText}** — ${fmtNowPL()}.`)
+      })
+      return interaction.reply({ content: 'Zmieniono termin ✅', ephemeral: true })
     }
-  }
-
-  // Modal submit: zmiana terminu
-  if (interaction.isModalSubmit()) {
-    const parts = interaction.customId.split(':') // raid:<anyId>:modal:setdate
-    if (parts[0] !== 'raid' || parts[2] !== 'modal' || parts[3] !== 'setdate') return
-    const anyId = parts[1]
-    const state = getStateByAnyId(anyId)
-    if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
-    if (interaction.user.id !== state.meta.leaderId) return interaction.reply({ content: 'Tylko lider może zmieniać termin.', ephemeral: true })
-
-    const dateText = interaction.fields.getTextInputValue('date_text')
-    const timeText = interaction.fields.getTextInputValue('time_text')
-    const startAtDate = parsePolishDate(dateText, timeText)
-
-    state.meta.dateText = dateText
-    state.meta.timeText = timeText
-    state.meta.startAt = startAtDate ? startAtDate.getTime() : undefined
-
-    await rerenderById(interaction.channel, state); saveStateDebounced()
-    await interaction.channel.send(`🗓️ Lider zaktualizował termin rajdu na **${dateText} ${timeText}** — ${fmtNowPL()}.`)
-    return interaction.reply({ content: 'Zmieniono termin ✅', ephemeral: true })
+  } catch (err) {
+    console.error('Interaction error:', err)
+    if (interaction.deferred || interaction.replied) {
+      try { await interaction.followUp({ ephemeral: true, content: '❌ Wystąpił błąd. Spróbuj ponownie.' }) } catch {}
+    } else {
+      try { await interaction.reply({ ephemeral: true, content: '❌ Wystąpił błąd. Spróbuj ponownie.' }) } catch {}
+    }
   }
 })
 
+// ─────────────────────────── Healthcheck (opcjonalny) ───────────────────────────
+const server = http.createServer((req, res) => {
+  if (req.url === '/' || req.url === '/health') {
+    const ok = client && client.isReady()
+    res.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      status: ok ? 'ok' : 'starting',
+      ready: !!ok,
+      guilds: ok ? client.guilds.cache.size : 0,
+      latency_ms: ok ? client.ws.ping : null,
+      timestamp: new Date().toISOString(),
+    }))
+  } else { res.writeHead(404); res.end('not found') }
+})
+const PORT = process.env.PORT || 3000
+server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
+
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
-
-
-
-

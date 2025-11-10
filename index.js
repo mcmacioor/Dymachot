@@ -305,11 +305,11 @@ const raidCreateCmd = new SlashCommandBuilder()
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
   .addUserOption(o => o.setName('lider').setDescription('Lider rajdu').setRequired(true))
   .addStringOption(o => o.setName('jaki_raid').setDescription('Jaki rajd').setRequired(true))
-  .addStringOption(o => o.setName('wymogi').setDescription('Wymogi').setRequired(true))
+  .addStringOption(o => o.setName('wymogi').setDescription('Wymogi (np. C90').setRequired(true))
   .addIntegerOption(o => o.setName('ilosc_slotow').setDescription('Ilość miejsc').setMinValue(1).setMaxValue(40).setRequired(true))
-  .addStringOption(o => o.setName('data').setDescription('Data (np. Wtorek, 11 listopada 2025 / 11.11.2025)').setRequired(true))
+  .addStringOption(o => o.setName('data').setDescription('Data (np. 11.11.2025)').setRequired(true))
   .addStringOption(o => o.setName('godzina').setDescription('Godzina (np. 21:00)').setRequired(true))
-  .addStringOption(o => o.setName('czas_trwania').setDescription('Czas trwania (np. 1h)').setRequired(true))
+  .addStringOption(o => o.setName('czas_trwania').setDescription('Czas trwania (np. 1H)').setRequired(true))
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN)
@@ -626,3 +626,4 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

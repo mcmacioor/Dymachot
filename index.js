@@ -205,12 +205,10 @@ function markVacancyIfNeeded(state) {
     state.meta.vacancySince = undefined
   }
 }
-
 function promoteFromReserve(state) {
   while (state.main.length < state.capacity && state.reserve.length > 0) {
     state.main.push(state.reserve.shift())
   }
-  // po uzupełnieniu braków resetujemy vacancy
   markVacancyIfNeeded(state)
 }
 
@@ -338,10 +336,10 @@ const raidCreateCmd = new SlashCommandBuilder()
   .addStringOption(o => o.setName('wymogi').setDescription('Wymogi').setRequired(true))
   .addIntegerOption(o =>
     o.setName('ilosc_slotow')
-     .setDescription('Ilość miejsc (max 20)')
-     .setMinValue(1)
-     .setMaxValue(20)
-     .setRequired(true)
+      .setDescription('Ilość miejsc (max 20)')
+      .setMinValue(1)
+      .setMaxValue(20)
+      .setRequired(true)
   )
   .addStringOption(o => o.setName('data').setDescription('Data (np. Wtorek, 11 listopada 2025 / 11.11.2025)').setRequired(true))
   .addStringOption(o => o.setName('godzina').setDescription('Godzina (np. 21:00)').setRequired(true))
@@ -349,11 +347,33 @@ const raidCreateCmd = new SlashCommandBuilder()
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN)
-  await rest.put(
-    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.DEV_GUILD_ID),
-    { body: [raidCreateCmd.toJSON()] }
-  )
-  console.log('✅ Zarejestrowano /raid (guild).')
+  const appId = process.env.CLIENT_ID
+  const guildId = process.env.DEV_GUILD_ID
+
+  if (!appId) {
+    console.error('❌ Brak CLIENT_ID w .env — nie mogę zarejestrować komend.')
+    return
+  }
+
+  try {
+    if (guildId) {
+      // rejestracja komendy GUILD (natychmiastowa propagacja)
+      const route = Routes.applicationGuildCommands(appId, guildId)
+      await rest.put(route, { body: [raidCreateCmd.toJSON()] })
+      console.log(`✅ Zarejestrowano /raid w gildii ${guildId}.`)
+    } else {
+      // fallback GLOBAL (propagacja może trwać dłużej)
+      const route = Routes.applicationCommands(appId)
+      await rest.put(route, { body: [raidCreateCmd.toJSON()] })
+      console.log('✅ Zarejestrowano /raid GLOBALNIE (brak DEV_GUILD_ID).')
+    }
+  } catch (e) {
+    const status = e?.status ?? e?.code ?? 'unknown'
+    console.error(`❌ Rejestracja komend nie powiodła się (status: ${status})`)
+    if (e?.requestBody?.json) console.error('Payload:', e.requestBody.json)
+    if (e?.rawError) console.error('API error:', e.rawError)
+    else console.error(e)
+  }
 }
 
 client.once('ready', async () => {
@@ -389,7 +409,6 @@ client.once('ready', async () => {
     for (const [, state] of raids) {
       if (state.meta?.vacancySince && now - state.meta.vacancySince >= VACANCY_DELAY_MS) {
         promoteFromReserve(state)
-        // po zmianie zrenderuj w tle
         ;(async () => {
           try {
             const channel = await client.channels.fetch(state.channelId)
@@ -518,11 +537,9 @@ client.on('interactionCreate', async interaction => {
       if (prefix !== 'raid') return
       const state = getStateByAnyId(anyId)
       if (!state) {
-      try {
-        return await interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
-      } catch {}
-      return
-    }
+        try { return await interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true }) } catch {}
+        return
+      }
       const panelId = state.panelId
       const userId = interaction.user.id
       const isLeader = userId === state.meta.leaderId
@@ -579,7 +596,6 @@ client.on('interactionCreate', async interaction => {
           const hadAlts = state.main.concat(state.reserve).some(e => e.userId === userId && e.isAlt)
           removeAllUser(state, userId, { onlyAlts: true })
           if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`)
-          // alts nie zmieniają składu; brak markVacancy
           await rerender(interaction, state); saveStateDebounced()
         })
         return interaction.deferUpdate()
@@ -600,69 +616,17 @@ client.on('interactionCreate', async interaction => {
         })
       }
 
+      // ── JEDYNY poprawny blok "Zarządzaj" (widoczny dla wszystkich, działa tylko dla lidera)
       if (action === 'manage') {
-      if (!isLeader) {
-        return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true });
-      }
-    
-      // Bezpieczne otwarcie panelu: najpierw defer (ephemeral), potem editReply
-      if (!interaction.deferred && !interaction.replied) {
-        await interaction.deferReply({ ephemeral: true });
-      }
-    
-      try {
-        await interaction.editReply({
-          content: 'Panel zarządzania:',
-          components: [managePanelRow(panelId), managePanelRow2(panelId)]
-        });
-      } catch (err) {
-        console.error('manage panel error:', err);
-        try {
-          await interaction.editReply({ content: '❌ Nie udało się otworzyć panelu zarządzania.', components: [] });
-        } catch {}
-      }
-      return;
-    }
-    
-      try {
-        await interaction.deferUpdate(); // ← najważniejsze
-        await interaction.followUp({
+        if (!isLeader) {
+          return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
+        }
+        return interaction.reply({
           ephemeral: true,
           content: 'Panel zarządzania:',
           components: [managePanelRow(panelId), managePanelRow2(panelId)]
-        });
-      } catch (err) {
-        console.error('manage panel error:', err);
-        try {
-          await interaction.followUp({ ephemeral: true, content: '❌ Nie udało się otworzyć panelu zarządzania.' })
-        } catch {}
+        })
       }
-      return;
-    }
-
-      
-        try {
-          // szybki defer, żeby Discord nie wywalił timeoutu
-          await interaction.deferReply({ ephemeral: true })
-      
-          // właściwa odpowiedź
-          await interaction.editReply({
-            content: 'Panel zarządzania:',
-            components: [managePanelRow(panelId), managePanelRow2(panelId)]
-          })
-        } catch (err) {
-          console.error('manage panel error:', err)
-          try {
-            if (interaction.deferred || interaction.replied) {
-              await interaction.editReply({ content: '❌ Nie udało się otworzyć panelu zarządzania.' })
-            } else {
-              await interaction.reply({ content: '❌ Nie udało się otworzyć panelu zarządzania.', ephemeral: true })
-            }
-          } catch {}
-        }
-        return
-      }
-
 
       if (!isLeader && action.startsWith('m_')) {
         return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
@@ -826,7 +790,7 @@ client.on('interactionCreate', async interaction => {
             if (idxMain === -1) return interaction.update({ content: 'Użytkownik nie jest w składzie.', components: [] })
             const entry = state.main.splice(idxMain, 1)[0]
             state.reserve.unshift(entry)
-            markVacancyIfNeeded(state) // powstała luka -> uruchom odliczanie
+            markVacancyIfNeeded(state) // powstała luka -> odliczanie
             await rerender(interaction, state); saveStateDebounced()
             return interaction.update({ content: `Przeniesiono <@${userId}> do **rezerwy** ✅`, components: [] })
           }
@@ -982,13 +946,11 @@ client.on('interactionCreate', async interaction => {
         await withLock(state.panelId, async () => {
           state.meta.raidName = newName || state.meta.raidName
           if (newCap !== state.capacity) {
-            // jeśli zmniejszamy i skład jest większy, zrzucamy nadmiar na początek rezerwy (kolejka)
             if (newCap < state.main.length) {
-              const overflow = state.main.splice(newCap) // odetnij końcówkę
+              const overflow = state.main.splice(newCap)
               state.reserve = [...overflow, ...state.reserve]
             }
             state.capacity = newCap
-            // po zmianie pojemności – jeśli jest luka, odliczanie 5 min
             markVacancyIfNeeded(state)
           }
           await rerenderById(interaction.channel, state); saveStateDebounced()
@@ -1026,6 +988,3 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
-
-
-

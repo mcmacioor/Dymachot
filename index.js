@@ -602,8 +602,27 @@ client.on('interactionCreate', async interaction => {
 
       if (action === 'manage') {
       if (!isLeader) {
-        return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
+        return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true });
       }
+    
+      // Bezpieczne otwarcie panelu: najpierw defer (ephemeral), potem editReply
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ ephemeral: true });
+      }
+    
+      try {
+        await interaction.editReply({
+          content: 'Panel zarządzania:',
+          components: [managePanelRow(panelId), managePanelRow2(panelId)]
+        });
+      } catch (err) {
+        console.error('manage panel error:', err);
+        try {
+          await interaction.editReply({ content: '❌ Nie udało się otworzyć panelu zarządzania.', components: [] });
+        } catch {}
+      }
+      return;
+    }
     
       try {
         await interaction.deferUpdate(); // ← najważniejsze
@@ -1007,5 +1026,6 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 
 

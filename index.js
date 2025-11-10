@@ -203,7 +203,7 @@ function buildEmbed(guild, { meta, main, reserve, capacity }) {
   const { leaderMention, raidName, dateText, timeText, duration, requirements, closed } = meta
   const head =
     `**Lider:** ${leaderMention}\n` +
-    `**Co:**\n${raidName}\n\n` +
+    `**Co:** ${raidName}\n\n` +
     `**Kiedy:** ${dateText} ${timeText} [${duration}]\n` +
     (closed ? '**[Zapisy zamknięte]**\n' : '') +
     '──────────────────────────────\n'
@@ -820,3 +820,4 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

@@ -95,41 +95,40 @@ function parsePolishDate(dateText, timeText) {
   return new Date(year, month - 1, day, hh, mm, 0, 0)
 }
 
-function loadState() {
-  try {
-    if (!fs.existsSync(DATA_PATH)) return
-    const raw = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'))
-    for (const [panelId, s] of Object.entries(raw)) {
-      const state = {
-        panelId,
-        capacity: s.capacity,
-        main: s.main || [],
-        reserve: s.reserve || [],
-        meta: s.meta || {},
-        channelId: s.channelId || null,
-        messageId: s.messageId || null,
-        guildId: s.guildId || null,
-      }
-      if (!state.meta.startAt) {
-        const d = parsePolishDate(state.meta.dateText, state.meta.timeText)
-        if (d) state.meta.startAt = d.getTime()
-      }
-      raids.set(panelId, state)
-    }
-    console.log(`🔁 Wczytano stan ${raids.size} raid(ów) z raids.json`)
-  } catch (e) {
-    console.error('Błąd wczytywania raids.json:', e)
-  }
-}
+// ─────────────────────────── Utils ───────────────────────────
+// Pełny datownik bez sekund (DD.MM.RRRR, HH:MM)
+const fmtNowPL = () => new Date().toLocaleString('pl-PL', {
+  timeZone: 'Europe/Warsaw',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit'
+})
+// Tylko HH:MM (używane przy wypisach)
+const fmtTimePL = () => new Date().toLocaleTimeString('pl-PL', {
+  timeZone: 'Europe/Warsaw',
+  hour: '2-digit',
+  minute: '2-digit'
+})
 
-let saveTimer = null
-function saveState() {
-  const obj = {}
-  for (const [k, v] of raids.entries()) obj[k] = v
-  try { fs.writeFileSync(DATA_PATH, JSON.stringify(obj, null, 2), 'utf8') }
-  catch (e) { console.error('Błąd zapisu raids.json:', e) }
+function humanizeDelta(ms) {
+  const sign = ms >= 0 ? 1 : -1
+  const abs = Math.abs(ms)
+  const d = Math.floor(abs / (24 * 60 * 60 * 1000))
+  const h = Math.floor((abs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000))
+  const m = Math.floor((abs % (60 * 60 * 1000)) / (60 * 1000))
+  const parts = []
+  if (d) parts.push(`${d}d`)
+  if (h) parts.push(`${h}h`)
+  if (m || (!d && !h)) parts.push(`${m}m`)
+  return sign > 0 ? `za ${parts.join(' ')}` : `${parts.join(' ')} temu`
 }
-function saveStateDebounced() { clearTimeout(saveTimer); saveTimer = setTimeout(saveState, 500) }
+function classEmoji(guild, cls) {
+  const name = classEmojiName(cls)
+  return name ? emStr(guild, name) : ''
+}
+function spEmoji(guild, cls, sp) { return emStr(guild, spEmojiName(cls, sp)) }
 
 // ─────────────────────────── Emoji helpers ───────────────────────────
 function _findEmoji(guild, nameWithColons) {
@@ -155,26 +154,6 @@ function classEmojiName(cls) {
   return null
 }
 function spEmojiName(cls, sp) { return `sp${sp}${CLASS_TO_TOKEN[cls] || 'lucznik'}` }
-
-// ─────────────────────────── Utils ───────────────────────────
-const fmtNowPL = () => new Date().toLocaleString('pl-PL', { timeZone: 'Europe/Warsaw' })
-function humanizeDelta(ms) {
-  const sign = ms >= 0 ? 1 : -1
-  const abs = Math.abs(ms)
-  const d = Math.floor(abs / (24 * 60 * 60 * 1000))
-  const h = Math.floor((abs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000))
-  const m = Math.floor((abs % (60 * 60 * 1000)) / (60 * 1000))
-  const parts = []
-  if (d) parts.push(`${d}d`)
-  if (h) parts.push(`${h}h`)
-  if (m || (!d && !h)) parts.push(`${m}m`)
-  return sign > 0 ? `za ${parts.join(' ')}` : `${parts.join(' ')} temu`
-}
-function classEmoji(guild, cls) {
-  const name = classEmojiName(cls)
-  return name ? emStr(guild, name) : ''
-}
-function spEmoji(guild, cls, sp) { return emStr(guild, spEmojiName(cls, sp)) }
 function equipmentBlock(guild) {
   return (
     '**Wyposażenie:**\n' +
@@ -294,14 +273,13 @@ function spSelect(panelId, kind, cls, guild) {
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
-  // .addUserOption(o => o.setName('lider')...)  // ← USUNIĘTE
   .addStringOption(o => o.setName('jaki_raid').setDescription('Jaki rajd').setRequired(true))
   .addStringOption(o => o.setName('wymogi').setDescription('Wymogi').setRequired(true))
   .addIntegerOption(o =>
     o.setName('ilosc_slotow')
      .setDescription('Ilość miejsc (max 20)')
      .setMinValue(1)
-     .setMaxValue(20) // ← twardy limit w UI
+     .setMaxValue(20)
      .setRequired(true)
   )
   .addStringOption(o => o.setName('data').setDescription('Data (np. Wtorek, 11 listopada 2025 / 11.11.2025)').setRequired(true))
@@ -328,7 +306,6 @@ client.once('ready', async () => {
       const start = state.meta?.startAt
       if (!state.meta?.closed && typeof start === 'number' && now >= (start + 10 * 60 * 1000)) {
         state.meta.closed = true
-        // spróbuj zaktualizować komponenty
         try {
           const guild = client.guilds.cache.get(state.guildId)
           const channel = guild?.channels?.cache?.get(state.channelId) || (await client.channels.fetch(state.channelId))
@@ -339,7 +316,7 @@ client.once('ready', async () => {
             components: [buttonsRow(state.panelId, true), altButtonsRow(state.panelId, true), manageRow(state.panelId)]
           })
           saveStateDebounced()
-        } catch { /* ignore w tle */ }
+        } catch { /* ignore */ }
       }
     }
   }, 60 * 1000)
@@ -350,13 +327,11 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return
   if (interaction.commandName !== 'raid') return
 
-  // lider zawsze autor komendy
   const leader = interaction.user
-
   const raidName    = interaction.options.getString('jaki_raid')
   const requirements= interaction.options.getString('wymogi')
   const requested   = interaction.options.getInteger('ilosc_slotow')
-  const capacity    = Math.min(20, Math.max(1, requested)) // twardy clamp 1..20
+  const capacity    = Math.min(20, Math.max(1, requested))
 
   const dateText    = interaction.options.getString('data')
   const timeText    = interaction.options.getString('godzina')
@@ -379,7 +354,6 @@ client.on('interactionCreate', async interaction => {
   const panelId = genPanelId()
   const embed = buildEmbed(interaction.guild, { meta, main: [], reserve: [], capacity })
 
-  // jeśli ktoś jakimś cudem podał >20 (np. stara zcache'owana komenda), poinformuj grzecznie
   const ephemeralNote = requested > 20
     ? { content: '⚠️ Maksymalna liczba miejsc to 20 — przycięto do 20.', ephemeral: true }
     : null
@@ -387,7 +361,7 @@ client.on('interactionCreate', async interaction => {
   await interaction.reply({
     embeds: [embed],
     components: [buttonsRow(panelId), altButtonsRow(panelId), manageRow(panelId)],
-    ...(ephemeralNote ? {} : {}) // reply i tak idzie jako public; notkę doślemy osobno jeśli trzeba
+    ...(ephemeralNote ? {} : {})
   })
   if (ephemeralNote) {
     try { await interaction.followUp(ephemeralNote) } catch {}
@@ -427,7 +401,7 @@ function promoteFromReserve(state) {
   return promoted
 }
 
-// Wspólna pomocnicza: promuj i ogłoś na kanale, kładąc akcent na oznaczenia
+// Ogłoś awanse (bez sekund w czasie)
 async function promoteAndAnnounce(channel, state) {
   const promoted = promoteFromReserve(state)
   if (promoted.length) {
@@ -506,7 +480,7 @@ client.on('interactionCreate', async interaction => {
           state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
           state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
           if (JSON.stringify({ main: state.main, reserve: state.reserve }) !== before) {
-            await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtNowPL()}.`)
+            await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtTimePL()}.`)
           }
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
@@ -518,7 +492,7 @@ client.on('interactionCreate', async interaction => {
         await withLock(panelId, async () => {
           const hadAny = state.main.some(e => e.userId === userId) || state.reserve.some(e => e.userId === userId)
           removeAllUser(state, userId, { onlyAlts: false })
-          if (hadAny) await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtNowPL()}.`)
+          if (hadAny) await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtTimePL()}.`)
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
         })
@@ -529,7 +503,7 @@ client.on('interactionCreate', async interaction => {
         await withLock(panelId, async () => {
           const hadAlts = state.main.concat(state.reserve).some(e => e.userId === userId && e.isAlt)
           removeAllUser(state, userId, { onlyAlts: true })
-          if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`)
+          if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtTimePL()}.`)
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
         })
@@ -538,7 +512,6 @@ client.on('interactionCreate', async interaction => {
 
       if (action === 'signup' || action === 'signup_alt') {
         if (action === 'signup_alt') {
-          // limit altów 3
           const altsCount = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt).length
           if (altsCount >= MAX_ALTS) {
             return interaction.reply({ ephemeral: true, content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).` })
@@ -691,8 +664,7 @@ client.on('interactionCreate', async interaction => {
 
             const entry = { userId: sess.targetId, cls, sp, isAlt: false }
             const goesToMainBeforePush = state.main.length < state.capacity
-            // push i rerender
-            state.main.length < state.capacity ? state.main.push(entry) : state.reserve.push(entry)
+            if (goesToMainBeforePush) state.main.push(entry); else state.reserve.push(entry)
             await promoteAndAnnounce(interaction.channel, state)
             await rerender(interaction, state); saveStateDebounced()
             manageSessions.delete(k)
@@ -707,24 +679,20 @@ client.on('interactionCreate', async interaction => {
             // nadpisz poprzedni main tego usera
             state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
             state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
-            // sprawdzamy, czy jest miejsce zanim dodamy
             goesToMainBeforePush = state.main.length < state.capacity
-            // dodajemy
             if (goesToMainBeforePush) state.main.push({ userId, cls, sp, isAlt: false })
             else state.reserve.push({ userId, cls, sp, isAlt: false })
           } else {
-            // ALT: limit np. 3 — bez duplikatów
+            // ALT: limit 3
             const altsList = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt)
             if (altsList.length >= MAX_ALTS) {
               return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
             }
-            // czy wleci do mainu przed dodaniem?
             goesToMainBeforePush = state.main.length < state.capacity
             if (goesToMainBeforePush) state.main.push({ userId, cls, sp, isAlt: true })
             else state.reserve.push({ userId, cls, sp, isAlt: true })
           }
 
-          // auto-promocje + render + zapis
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
 
@@ -772,12 +740,10 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (mode === 'promote') {
-          // z rezerwy do składu (jeśli pełny skład -> ostatni z main do rezerwy)
           const idxRes = state.reserve.findIndex(e => e.userId === targetId)
           if (idxRes === -1) return interaction.update({ content: 'Użytkownik nie jest w rezerwie.', components: [] })
           const entry = state.reserve.splice(idxRes, 1)[0]
           if (state.main.length >= state.capacity) {
-            // zrzucamy ostatniego do rezerwy
             const bumped = state.main.pop()
             state.reserve.unshift(bumped)
           }
@@ -788,12 +754,11 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (mode === 'demote') {
-          // ze składu do rezerwy
           const idxMain = state.main.findIndex(e => e.userId === targetId)
           if (idxMain === -1) return interaction.update({ content: 'Użytkownik nie jest w składzie.', components: [] })
           const entry = state.main.splice(idxMain, 1)[0]
-          state.reserve.unshift(entry) // na początek rezerwy
-          await promoteAndAnnounce(interaction.channel, state) // wypełnij lukę i ogłoś
+          state.reserve.unshift(entry)
+          await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
           return interaction.update({ content: `Przeniesiono <@${targetId}> do **rezerwy** ✅`, components: [] })
         }
@@ -817,7 +782,6 @@ client.on('interactionCreate', async interaction => {
         state.meta.dateText = dateText
         state.meta.timeText = timeText
         state.meta.startAt = startAtDate ? startAtDate.getTime() : undefined
-        // po zmianie terminu zdejmujemy auto-closed (otwieramy zapisy ponownie)
         state.meta.closed = false
         await rerenderById(interaction.channel, state); saveStateDebounced()
         await interaction.channel.send(`🗓️ Lider zaktualizował termin rajdu na **${dateText} ${timeText}** — ${fmtNowPL()}.`)

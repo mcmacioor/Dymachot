@@ -377,7 +377,7 @@ client.on('interactionCreate', async interaction => {
   }
 
   const panelId = genPanelId()
-  const embed = buildEmbed({ meta, main: [], reserve: [], capacity })
+  const embed = buildEmbed(interaction.guild, { meta, main: [], reserve: [], capacity })
 
   // jeśli ktoś jakimś cudem podał >20 (np. stara zcache'owana komenda), poinformuj grzecznie
   const ephemeralNote = requested > 20
@@ -396,12 +396,14 @@ client.on('interactionCreate', async interaction => {
   const sent = await interaction.fetchReply()
 
   raids.set(panelId, {
+    panelId,
     capacity,
     main: [],
     reserve: [],
     meta,
     channelId: sent.channelId,
-    messageId: sent.id
+    messageId: sent.id,
+    guildId: sent.guildId
   })
   saveStateDebounced()
 })
@@ -818,5 +820,6 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 
 

@@ -107,6 +107,11 @@ function parsePolishDate(dateText, timeText) {
     return new Date(year, month - 1, day, hh, mm, 0, 0)
 }
 
+// TEMP HARD RESET
+if (fs.existsSync(DATA_PATH)) {
+    fs.writeFileSync(DATA_PATH, JSON.stringify({}), 'utf8')
+    console.log("‼️ HARD RESET raids.json wykonany")
+}
 function loadState() {
     try {
         if (!fs.existsSync(DATA_PATH)) return
@@ -663,6 +668,7 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 
 
 

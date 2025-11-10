@@ -251,8 +251,11 @@ async function recoverFromMessage(interaction, panelId) {
     let requirements = '—'
     {
       const m = desc.match(/\*\*Wymogi:\*\*([\s\S]*?)──────────────────────────────/)
-      if (m) requirements = m[1].trim()
-    }
+      if (m) {
+        const raw = m[1]
+        // jeśli w środku jest "Wyposażenie", bierz tylko to co przed nim
+        requirements = raw.split(/\*\*Wyposażenie:\*\*/i)[0].trim()
+      }
 
     // ——— capacity
     let capacity = 20
@@ -1027,4 +1030,5 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 

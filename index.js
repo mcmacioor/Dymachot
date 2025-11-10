@@ -332,6 +332,16 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return
   if (interaction.commandName !== 'raid') return
 
+  // sprawdzamy role
+  const REQUIRED_ROLE = process.env.RAID_ROLE_ID  // w .env dajesz ID roli
+
+  if (!interaction.member.roles.cache.has(REQUIRED_ROLE)) {
+    return interaction.reply({
+      ephemeral: true,
+      content: '❌ Nie masz uprawnień do użycia tej komendy.'
+    })
+  }
+
   const leader = interaction.options.getUser('lider')
   const raidName = interaction.options.getString('jaki_raid')
   const requirements = interaction.options.getString('wymogi')
@@ -627,5 +637,6 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 
 

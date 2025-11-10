@@ -325,14 +325,33 @@ function promoteFromReserve(state) {
     state.main.push(state.reserve.shift())
   }
 }
-async function rerender(interaction, state) {
-  const message = await interaction.channel.messages.fetch(state.messageId)
-  const newEmbed = buildEmbed({ meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
-  await message.edit({ embeds: [newEmbed] })
+async function rerender(interaction, messageId, state) {
+  const newEmbed = buildEmbed({
+    meta: state.meta,
+    main: state.main,
+    reserve: state.reserve,
+    capacity: state.capacity
+  })
+
+  // jeżeli to jest ta sama wiadomość (kliknięta właśnie)
+  if (interaction.message && interaction.message.id === messageId) {
+    await interaction.message.edit({ embeds: [newEmbed] })
+    return
+  }
+
+  // fallback - tylko jak naprawdę musi pobrać
+  const msg = await interaction.channel.messages.fetch(messageId)
+  await msg.edit({ embeds: [newEmbed] })
 }
-async function rerenderById(channel, state) {
-  const msg = await channel.messages.fetch(state.messageId)
-  const newEmbed = buildEmbed({ meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
+
+async function rerenderById(channel, messageId, state) {
+  const msg = await channel.messages.fetch(messageId)
+  const newEmbed = buildEmbed({
+    meta: state.meta,
+    main: state.main,
+    reserve: state.reserve,
+    capacity: state.capacity
+  })
   await msg.edit({ embeds: [newEmbed] })
 }
 
@@ -663,3 +682,4 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

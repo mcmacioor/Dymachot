@@ -415,15 +415,28 @@ function removeAllUser(state, userId, { onlyAlts = false } = {}) {
   state.main = state.main.filter(filt)
   state.reserve = state.reserve.filter(filt)
 }
-function pushEntry(state, entry) {
-  if (state.main.length < state.capacity) state.main.push(entry)
-  else state.reserve.push(entry)
-}
+
+// ZWRACA listę przeniesionych (dla ogłoszenia)
 function promoteFromReserve(state) {
+  const promoted = []
   while (state.main.length < state.capacity && state.reserve.length > 0) {
-    state.main.push(state.reserve.shift())
+    const moved = state.reserve.shift()
+    state.main.push(moved)
+    promoted.push(moved)
   }
+  return promoted
 }
+
+// Wspólna pomocnicza: promuj i ogłoś na kanale, kładąc akcent na oznaczenia
+async function promoteAndAnnounce(channel, state) {
+  const promoted = promoteFromReserve(state)
+  if (promoted.length) {
+    const mentions = [...new Set(promoted.map(e => `<@${e.userId}>`))].join(' ')
+    await channel.send(`⬆️ Z rezerwy do **głównego składu**: ${mentions} — ${fmtNowPL()}.`)
+  }
+  return promoted
+}
+
 async function rerender(interaction, state) {
   const guild = interaction.guild ?? client.guilds.cache.get(state.guildId)
   const newEmbed = buildEmbed(guild, state)
@@ -495,7 +508,8 @@ client.on('interactionCreate', async interaction => {
           if (JSON.stringify({ main: state.main, reserve: state.reserve }) !== before) {
             await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtNowPL()}.`)
           }
-          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
+          await promoteAndAnnounce(interaction.channel, state)
+          await rerender(interaction, state); saveStateDebounced()
         })
         return interaction.deferUpdate()
       }
@@ -505,7 +519,8 @@ client.on('interactionCreate', async interaction => {
           const hadAny = state.main.some(e => e.userId === userId) || state.reserve.some(e => e.userId === userId)
           removeAllUser(state, userId, { onlyAlts: false })
           if (hadAny) await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtNowPL()}.`)
-          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
+          await promoteAndAnnounce(interaction.channel, state)
+          await rerender(interaction, state); saveStateDebounced()
         })
         return interaction.deferUpdate()
       }
@@ -515,7 +530,8 @@ client.on('interactionCreate', async interaction => {
           const hadAlts = state.main.concat(state.reserve).some(e => e.userId === userId && e.isAlt)
           removeAllUser(state, userId, { onlyAlts: true })
           if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`)
-          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
+          await promoteAndAnnounce(interaction.channel, state)
+          await rerender(interaction, state); saveStateDebounced()
         })
         return interaction.deferUpdate()
       }
@@ -674,30 +690,46 @@ client.on('interactionCreate', async interaction => {
             state.reserve = state.reserve.filter(e => !(e.userId === sess.targetId && !e.isAlt))
 
             const entry = { userId: sess.targetId, cls, sp, isAlt: false }
-            pushEntry(state, entry); promoteFromReserve(state)
+            const goesToMainBeforePush = state.main.length < state.capacity
+            // push i rerender
+            state.main.length < state.capacity ? state.main.push(entry) : state.reserve.push(entry)
+            await promoteAndAnnounce(interaction.channel, state)
             await rerender(interaction, state); saveStateDebounced()
             manageSessions.delete(k)
-            return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(interaction.guild, cls)} SP ${sp} ✅`, components: [] })
+            const whereTxt = goesToMainBeforePush ? 'do **głównego składu**' : 'do **rezerwy**'
+            return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(interaction.guild, cls)} SP ${sp} — ${whereTxt} ✅`, components: [] })
           }
 
-            const userId = interaction.user.id
-            if (kind === 'main') {
-              // nadpisz poprzedni main tego usera
-              state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
-              state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
-              pushEntry(state, { userId, cls, sp, isAlt: false })
-            } else {
-              // ALT: limit np. 3 — BEZ sprawdzania duplikatów
-              const MAX_ALTS = 3 // (lub użyj swojego, jeśli masz już zdefiniowany)
-              const altsList = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt)
-              if (altsList.length >= MAX_ALTS) {
-                return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
-              }
-              pushEntry(state, { userId, cls, sp, isAlt: true })
-            }
+          const userId = interaction.user.id
+          let goesToMainBeforePush
 
-          promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
-          return interaction.update({ content: 'Zapisano ✅', components: [] })
+          if (kind === 'main') {
+            // nadpisz poprzedni main tego usera
+            state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
+            state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
+            // sprawdzamy, czy jest miejsce zanim dodamy
+            goesToMainBeforePush = state.main.length < state.capacity
+            // dodajemy
+            if (goesToMainBeforePush) state.main.push({ userId, cls, sp, isAlt: false })
+            else state.reserve.push({ userId, cls, sp, isAlt: false })
+          } else {
+            // ALT: limit np. 3 — bez duplikatów
+            const altsList = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt)
+            if (altsList.length >= MAX_ALTS) {
+              return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
+            }
+            // czy wleci do mainu przed dodaniem?
+            goesToMainBeforePush = state.main.length < state.capacity
+            if (goesToMainBeforePush) state.main.push({ userId, cls, sp, isAlt: true })
+            else state.reserve.push({ userId, cls, sp, isAlt: true })
+          }
+
+          // auto-promocje + render + zapis
+          await promoteAndAnnounce(interaction.channel, state)
+          await rerender(interaction, state); saveStateDebounced()
+
+          const whereTxt = goesToMainBeforePush ? 'do **głównego składu**' : 'do **rezerwy**'
+          return interaction.update({ content: `Zapisano ${whereTxt} ✅`, components: [] })
         })
       }
     }
@@ -724,10 +756,10 @@ client.on('interactionCreate', async interaction => {
         if (mode === 'remove') {
           const before = JSON.stringify({ main: state.main, reserve: state.reserve })
           removeAllUser(state, targetId, { onlyAlts: false })
-          promoteFromReserve(state)
-          await rerender(interaction, state); saveStateDebounced()
           const changed = JSON.stringify({ main: state.main, reserve: state.reserve }) !== before
           if (changed) await interaction.channel.send(`🗑️ <@${targetId}> usunięty przez lidera — ${fmtNowPL()}.`)
+          await promoteAndAnnounce(interaction.channel, state)
+          await rerender(interaction, state); saveStateDebounced()
           return interaction.update({ content: changed ? 'Usunięto ✅' : 'Użytkownik nie był zapisany.', components: [] })
         }
 
@@ -751,6 +783,7 @@ client.on('interactionCreate', async interaction => {
           }
           state.main.push(entry)
           await rerender(interaction, state); saveStateDebounced()
+          await interaction.channel.send(`⬆️ <@${targetId}> przeniesiony przez lidera **do składu** — ${fmtNowPL()}.`)
           return interaction.update({ content: `Przeniesiono <@${targetId}> do **składu** ✅`, components: [] })
         }
 
@@ -760,7 +793,7 @@ client.on('interactionCreate', async interaction => {
           if (idxMain === -1) return interaction.update({ content: 'Użytkownik nie jest w składzie.', components: [] })
           const entry = state.main.splice(idxMain, 1)[0]
           state.reserve.unshift(entry) // na początek rezerwy
-          promoteFromReserve(state) // tylko jeśli jest luka
+          await promoteAndAnnounce(interaction.channel, state) // wypełnij lukę i ogłoś
           await rerender(interaction, state); saveStateDebounced()
           return interaction.update({ content: `Przeniesiono <@${targetId}> do **rezerwy** ✅`, components: [] })
         }
@@ -820,4 +853,3 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
-

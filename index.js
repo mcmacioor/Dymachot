@@ -88,7 +88,8 @@ function loadState() {
         reserve: s.reserve || [],
         meta: s.meta,
         channelId: s.channelId || null,
-        messageId: s.messageId || null
+        messageId: s.messageId || null,
+        guildId: s.guildId || null
       }
       if (!state.meta.startAt) {
         const d = parsePolishDate(state.meta.dateText, state.meta.timeText)
@@ -111,9 +112,34 @@ function saveState() {
 }
 function saveStateDebounced() { clearTimeout(saveTimer); saveTimer = setTimeout(saveState, 500) }
 
-// ─────────────────────────── Utils ───────────────────────────
+// ─────────────────────────── Emoji helpers ───────────────────────────
+function _findEmoji(guild, nameWithColons) {
+  if (!guild) return null
+  const clean = String(nameWithColons).replace(/:/g, '')
+  return guild.emojis?.cache?.find(e => e.name === clean) || null
+}
+function emStr(guild, nameWithColons) {
+  const e = _findEmoji(guild, nameWithColons)
+  return e ? `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>` : `:${nameWithColons}:`
+}
+function emObj(guild, nameWithColons) {
+  const e = _findEmoji(guild, nameWithColons)
+  return e ? { id: e.id } : undefined
+}
 const CLASS_OPTIONS = ['Łucznik', 'Wojownik', 'Mag', 'MSW']
 const CLASS_TO_TOKEN = { 'Łucznik': 'lucznik', 'Wojownik': 'woj', 'Mag': 'mag', 'MSW': 'msw' }
+function classEmojiName(cls) {
+  if (cls === 'Łucznik') return 'Lucznik'
+  if (cls === 'Wojownik') return 'Wojownik'
+  if (cls === 'Mag') return 'Mag'
+  if (cls === 'MSW') return 'Msw'
+  return null
+}
+function spEmojiName(cls, sp) {
+  return `sp${sp}${CLASS_TO_TOKEN[cls] || 'lucznik'}`
+}
+
+// ─────────────────────────── Utils ───────────────────────────
 const fmtNowPL = () => new Date().toLocaleString('pl-PL', { timeZone: 'Europe/Warsaw' })
 function humanizeDelta(ms) {
   const sign = ms >= 0 ? 1 : -1
@@ -127,32 +153,29 @@ function humanizeDelta(ms) {
   if (m || (!d && !h)) parts.push(`${m}m`)
   return sign > 0 ? `za ${parts.join(' ')}` : `${parts.join(' ')} temu`
 }
-function classEmoji(cls) {
-  if (cls === 'Łucznik') return ':Lucznik:'
-  if (cls === 'Wojownik') return ':Wojownik:'
-  if (cls === 'Mag') return ':Mag:'
-  if (cls === 'MSW') return ':Msw:'
-  return ''
+
+function classEmoji(guild, cls) {
+  const name = classEmojiName(cls)
+  return name ? emStr(guild, name) : ''
 }
-function spEmoji(cls, sp) {
-  const token = CLASS_TO_TOKEN[cls] || 'lucznik'
-  return `:sp${sp}${token}:`
+function spEmoji(guild, cls, sp) {
+  return emStr(guild, spEmojiName(cls, sp))
 }
-function equipmentBlock() {
+function equipmentBlock(guild) {
   return (
     '**Wyposażenie:**\n' +
-    ':Ancelloan: Ancek dla peta\n' +
-    ':Wzmacniacz: Wzmacniacz wrózki\n' +
-    ':Tarot: Demon/słońce 250\n' +
-    ':Eliksirataku: Potki ataku\n' +
-    ':Fulka: Fulki\n'
+    `${emStr(guild, 'Ancelloan')} Ancek dla peta\n` +
+    `${emStr(guild, 'Wzmacniacz')} Wzmacniacz wrózki\n` +
+    `${emStr(guild, 'Tarot')} Demon/słońce 250\n` +
+    `${emStr(guild, 'Eliksirataku')} Potki ataku\n` +
+    `${emStr(guild, 'Fulka')} Fulki\n`
   )
 }
-function userLine(entry, index) {
+function userLine(guild, entry, index) {
   const tag = `<@${entry.userId}>`
-  const clsEm = classEmoji(entry.cls)
-  const spEm = spEmoji(entry.cls, entry.sp)
-  const alt = entry.isAlt ? ' (Alt)' : ''
+  const clsEm = classEmoji(guild, entry.cls)
+  const spEm  = spEmoji(guild, entry.cls, entry.sp)
+  const alt   = entry.isAlt ? ' (Alt)' : ''
   return `${index}. ${tag} ${clsEm} [${entry.cls}] ${spEm} [SP ${entry.sp}]${alt}`
 }
 
@@ -166,7 +189,7 @@ function getStateByAnyId(anyId) {
 }
 
 // ─────────────────────────── Render ───────────────────────────
-function buildEmbed({ meta, main, reserve, capacity }) {
+function buildEmbed(guild, { meta, main, reserve, capacity }) {
   const { leaderMention, raidName, dateText, timeText, duration, requirements } = meta
   const head =
     `**Lider:** ${leaderMention}\n` +
@@ -175,15 +198,15 @@ function buildEmbed({ meta, main, reserve, capacity }) {
     '──────────────────────────────\n'
   const reqAndEquip =
     `**Wymogi:**\n${requirements}\n` +
-    equipmentBlock() +
+    equipmentBlock(guild) +
     '──────────────────────────────\n'
 
   const mainLines = []
   for (let i = 0; i < capacity; i++) {
     const entry = main[i]
-    mainLines.push(entry ? userLine(entry, i + 1) : `${i + 1}. —`)
+    mainLines.push(entry ? userLine(guild, entry, i + 1) : `${i + 1}. —`)
   }
-  const reserveList = reserve.length ? reserve.map((e, i) => userLine(e, i + 1)).join('\n') : '—'
+  const reserveList = reserve.length ? reserve.map((e, i) => userLine(guild, e, i + 1)).join('\n') : '—'
 
   return new EmbedBuilder()
     .setTitle('Dymacho Rajd')
@@ -198,7 +221,8 @@ function buildEmbed({ meta, main, reserve, capacity }) {
 // edycja bez fetch, gdy to ta sama wiadomość
 async function rerender(interaction, state) {
   if (!state) return
-  const newEmbed = buildEmbed({ meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
+  const guild = interaction.guild ?? client.guilds.cache.get(state.guildId)
+  const newEmbed = buildEmbed(guild, { meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
   if (interaction.message && interaction.message.id === state.messageId) {
     await interaction.message.edit({ embeds: [newEmbed] })
     return
@@ -208,8 +232,9 @@ async function rerender(interaction, state) {
 }
 async function rerenderById(channel, state) {
   if (!state) return
+  const guild = channel.guild ?? client.guilds.cache.get(state.guildId)
   const msg = await channel.messages.fetch(state.messageId)
-  const newEmbed = buildEmbed({ meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
+  const newEmbed = buildEmbed(guild, { meta: state.meta, main: state.main, reserve: state.reserve, capacity: state.capacity })
   await msg.edit({ embeds: [newEmbed] })
 }
 
@@ -242,19 +267,29 @@ function managePanelRow(panelId) {
     new ButtonBuilder().setCustomId(`raid:${panelId}:m_ping`).setLabel('Oznacz zapisanych').setStyle(ButtonStyle.Primary),
   )
 }
-function classSelect(panelId, kind) {
+function classSelect(panelId, kind, guild) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`raid:${panelId}:pickclass:${kind}`)
       .setPlaceholder('Wybierz klasę')
-      .addOptions(CLASS_OPTIONS.map(c => ({ label: `${classEmoji(c)} ${c}`.trim(), value: c })))
+      .addOptions(
+        ['Łucznik', 'Wojownik', 'Mag', 'MSW'].map(c => ({
+          label: c,
+          value: c,
+          emoji: emObj(guild, classEmojiName(c))
+        }))
+      )
   )
 }
-function spSelect(panelId, kind, cls) {
+function spSelect(panelId, kind, cls, guild) {
   const count = cls === 'MSW' ? 7 : 11
   const options = Array.from({ length: count }, (_, i) => {
     const n = i + 1
-    return { label: `${spEmoji(cls, n)} SP ${n}`, value: String(n) }
+    return {
+      label: `SP ${n}`,
+      value: String(n),
+      emoji: emObj(guild, spEmojiName(cls, n))
+    }
   })
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -319,7 +354,7 @@ client.on('interactionCreate', async interaction => {
   }
 
   const panelId = genPanelId()
-  const embed = buildEmbed({ meta, main: [], reserve: [], capacity })
+  const embed = buildEmbed(interaction.guild, { meta, main: [], reserve: [], capacity })
   await interaction.reply({ embeds: [embed], components: [buttonsRow(panelId), altButtonsRow(panelId), manageRow(panelId)] })
   const sent = await interaction.fetchReply()
 
@@ -329,7 +364,8 @@ client.on('interactionCreate', async interaction => {
     reserve: [],
     meta,
     channelId: sent.channelId,
-    messageId: sent.id
+    messageId: sent.id,
+    guildId: sent.guildId
   })
   saveStateDebounced()
 })
@@ -354,7 +390,7 @@ client.on('interactionCreate', async interaction => {
     if (prefix !== 'raid') return
     const state = getStateByAnyId(anyId)
     if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
-    const panelId = anyId // zachowujemy w customId
+    const panelId = anyId
 
     const userId = interaction.user.id
     const isLeader = userId === state.meta.leaderId
@@ -402,7 +438,11 @@ client.on('interactionCreate', async interaction => {
 
     if (action === 'signup' || action === 'signup_alt') {
       const kind = action === 'signup_alt' ? 'alt' : 'main'
-      return interaction.reply({ ephemeral: true, content: 'Wybierz klasę:', components: [classSelect(panelId, kind)] })
+      return interaction.reply({
+        ephemeral: true,
+        content: 'Wybierz klasę:',
+        components: [classSelect(panelId, kind, interaction.guild)]
+      })
     }
 
     if (action === 'manage') {
@@ -493,7 +533,10 @@ client.on('interactionCreate', async interaction => {
     if (parts[2] === 'pickclass') {
       const kind = parts[3]
       const cls = interaction.values[0]
-      return interaction.update({ content: `Klasa: **${classEmoji(cls)} ${cls}** – teraz wybierz **SP**:`, components: [spSelect(anyId, kind, cls)] })
+      return interaction.update({
+        content: `Klasa: **${classEmoji(interaction.guild, cls)} ${cls}** – teraz wybierz **SP**:`,
+        components: [spSelect(anyId, kind, cls, interaction.guild)]
+      })
     }
 
     if (parts[2] === 'picksp') {
@@ -508,7 +551,7 @@ client.on('interactionCreate', async interaction => {
         const entry = { userId: sess.targetId, cls, sp, isAlt: false }
         pushEntry(state, entry); promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
         manageSessions.delete(k)
-        return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(cls)} SP ${sp} ✅`, components: [] })
+        return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(interaction.guild, cls)} SP ${sp} ✅`, components: [] })
       }
 
       const userId = interaction.user.id
@@ -537,7 +580,7 @@ client.on('interactionCreate', async interaction => {
     if (mode === 'add') {
       const k = sessionKey(interaction, anyId)
       manageSessions.set(k, { mode: 'add', targetId })
-      return interaction.update({ content: `Dodawanie: <@${targetId}>\nWybierz klasę:`, components: [classSelect(anyId, 'madd')] })
+      return interaction.update({ content: `Dodawanie: <@${targetId}>\nWybierz klasę:`, components: [classSelect(anyId, 'madd', interaction.guild)] })
     }
 
     if (mode === 'remove') {

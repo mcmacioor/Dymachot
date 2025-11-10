@@ -290,25 +290,6 @@ function spSelect(panelId, kind, cls, guild) {
   )
 }
 
-// ─────────────────────────── Szablony ───────────────────────────
-const TEMPLATES = {
-  ZTS: {
-    raidName: 'ZTS – Zapasowy Twardy Szturm',
-    requirements: '90+ Lv, SP +13, rezisty 90+, DPS/Gra w roli',
-    duration: '1h30m',
-  },
-  GLACERNON: {
-    raidName: 'Glacernon',
-    requirements: '100+ Lv, rezisty lodu, SP defensywne na bossy',
-    duration: '2h',
-  },
-  PTS: {
-    raidName: 'PTS – Piekielny Twardy Szturm',
-    requirements: '95+ Lv, SP +15, DPS/FULL buff, obeznanie z mechaniką',
-    duration: '1h45m',
-  }
-}
-
 // ─────────────────────────── /raid ───────────────────────────
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
@@ -696,24 +677,21 @@ client.on('interactionCreate', async interaction => {
             return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(interaction.guild, cls)} SP ${sp} ✅`, components: [] })
           }
 
-          const userId = interaction.user.id
-          if (kind === 'main') {
-            // nadpisz poprzedni main tego usera
-            state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
-            state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
-            pushEntry(state, { userId, cls, sp, isAlt: false })
-          } else {
-            // ALT: limit 3 i brak identycznych duplikatów
-            const altsList = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt)
-            if (altsList.length >= MAX_ALTS) {
-              return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
+            const userId = interaction.user.id
+            if (kind === 'main') {
+              // nadpisz poprzedni main tego usera
+              state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
+              state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
+              pushEntry(state, { userId, cls, sp, isAlt: false })
+            } else {
+              // ALT: limit np. 3 — BEZ sprawdzania duplikatów
+              const MAX_ALTS = 3 // (lub użyj swojego, jeśli masz już zdefiniowany)
+              const altsList = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt)
+              if (altsList.length >= MAX_ALTS) {
+                return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
+              }
+              pushEntry(state, { userId, cls, sp, isAlt: true })
             }
-            const duplicate = altsList.some(e => e.cls === cls && e.sp === sp)
-            if (duplicate) {
-              return interaction.update({ content: '⚠️ Taki sam ALT (klasa+SP) już jest zapisany.', components: [] })
-            }
-            pushEntry(state, { userId, cls, sp, isAlt: true })
-          }
 
           promoteFromReserve(state); await rerender(interaction, state); saveStateDebounced()
           return interaction.update({ content: 'Zapisano ✅', components: [] })
@@ -839,3 +817,4 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

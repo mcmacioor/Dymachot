@@ -816,4 +816,6 @@ const server = http.createServer((req, res) => {
   } else { res.writeHead(404); res.end('not found') }
 })
 const PORT = process.env.PORT || 3000
-server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
+const PORT = process.env.PORT || 3000 server.listen(PORT, () => console.log(Healthcheck on :${PORT})) 
+client.login(process.env.BOT_TOKEN)
+

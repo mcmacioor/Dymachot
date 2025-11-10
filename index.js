@@ -20,6 +20,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  PermissionFlagsBits,            // ← DODANE
 } = require('discord.js')
 
 // ─────────────────────────── Client (ograniczony cache) ───────────────────────────
@@ -198,26 +199,43 @@ function getStateByAnyId(anyId) {
   return null
 }
 
+// ─────────────────────────── Permission / error helpers ───────────────────────────
+function isMissingAccess(err) {
+  return (
+    (err && (err.code === 50001 || err.status === 403)) ||
+    /Missing Access/i.test(String(err?.message || ''))
+  )
+}
+function canPost(channel) {
+  try {
+    const me = channel?.guild?.members?.me
+    if (!me) return true
+    const perms = channel.permissionsFor(me)
+    if (!perms) return true
+    return (
+      perms.has(PermissionFlagsBits.ViewChannel) &&
+      perms.has(PermissionFlagsBits.SendMessages) &&
+      perms.has(PermissionFlagsBits.EmbedLinks)
+    )
+  } catch { return true }
+}
+
 // ─────────────────────────── Soft recovery z wiadomości ───────────────────────────
 async function recoverFromMessage(interaction, panelId) {
   try {
     const msg = interaction?.message
     if (!msg) return null
 
-    // Pobierz pierwszy embed i surową treść
     const emb = msg.embeds?.[0]
     const desc = emb?.data?.description || emb?.description || ''
     if (!desc) return null
 
-    // **Lider:** <@123>
     const leaderMatch = desc.match(/\*\*Lider:\*\*\s*<@!?(\d+)>/)
     const leaderId = leaderMatch?.[1] || interaction.user?.id
 
-    // **Co:** Nazwa rajdu
     const coMatch = desc.match(/\*\*Co:\*\*\s*([^\n]+)/)
     const raidName = coMatch ? coMatch[1].trim() : 'Raid'
 
-    // **Kiedy:** <...> [czas]
     const kiedyMatch = desc.match(/\*\*Kiedy:\*\*\s*(.+?)\s*\[(.+?)\]/)
     let dateText = '', timeText = '', duration = ''
     if (kiedyMatch) {
@@ -228,7 +246,6 @@ async function recoverFromMessage(interaction, panelId) {
       dateText = kiedyRaw.replace(new RegExp(`\\s*${timeText}\\s*$`), '').trim()
     }
 
-    // **Wymogi:** ... (do najbliższej linii z separatorami)
     let requirements = '—'
     const wymogiIdx = desc.indexOf('**Wymogi:**')
     if (wymogiIdx >= 0) {
@@ -237,7 +254,6 @@ async function recoverFromMessage(interaction, panelId) {
       requirements = cut.trim()
     }
 
-    // **Skład ( x/Y ):**
     let capacity = 20
     const skladMatch = desc.match(/\*\*Skład\s*\(\s*\d+\s*\/\s*(\d+)\s*\)\s*:\*\*/)
     if (skladMatch) {
@@ -375,14 +391,13 @@ function spSelect(panelId, kind, cls, guild) {
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
-  // .addUserOption(o => o.setName('lider')...)  // ← USUNIĘTE
   .addStringOption(o => o.setName('jaki_raid').setDescription('Jaki rajd').setRequired(true))
   .addStringOption(o => o.setName('wymogi').setDescription('Wymogi').setRequired(true))
   .addIntegerOption(o =>
     o.setName('ilosc_slotow')
      .setDescription('Ilość miejsc (max 20)')
      .setMinValue(1)
-     .setMaxValue(20) // ← twardy limit w UI
+     .setMaxValue(20)
      .setRequired(true)
   )
   .addStringOption(o => o.setName('data').setDescription('Data (np. Wtorek, 11 listopada 2025 / 11.11.2025)').setRequired(true))
@@ -409,7 +424,6 @@ client.once('ready', async () => {
       const start = state.meta?.startAt
       if (!state.meta?.closed && typeof start === 'number' && now >= (start + 10 * 60 * 1000)) {
         state.meta.closed = true
-        // spróbuj zaktualizować komponenty
         try {
           const guild = client.guilds.cache.get(state.guildId)
           const channel = guild?.channels?.cache?.get(state.channelId) || (await client.channels.fetch(state.channelId))
@@ -431,13 +445,12 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return
   if (interaction.commandName !== 'raid') return
 
-  // lider zawsze autor komendy
   const leader = interaction.user
 
   const raidName    = interaction.options.getString('jaki_raid')
   const requirements= interaction.options.getString('wymogi')
   const requested   = interaction.options.getInteger('ilosc_slotow')
-  const capacity    = Math.min(20, Math.max(1, requested)) // twardy clamp 1..20
+  const capacity    = Math.min(20, Math.max(1, requested))
 
   const dateText    = interaction.options.getString('data')
   const timeText    = interaction.options.getString('godzina')
@@ -460,7 +473,6 @@ client.on('interactionCreate', async interaction => {
   const panelId = genPanelId()
   const embed = buildEmbed(interaction.guild, { meta, main: [], reserve: [], capacity })
 
-  // jeśli ktoś jakimś cudem podał >20 (np. stara zcache'owana komenda), poininformuj grzecznie
   const ephemeralNote = requested > 20
     ? { content: '⚠️ Maksymalna liczba miejsc to 20 — przycięto do 20.', ephemeral: true }
     : null
@@ -510,9 +522,17 @@ function promoteFromReserve(state) {
 // Wspólna pomocnicza: promuj i ogłoś na kanale, kładąc akcent na oznaczenia
 async function promoteAndAnnounce(channel, state) {
   const promoted = promoteFromReserve(state)
-  if (promoted.length) {
+  if (promoted.length && channel && canPost(channel)) {
     const mentions = [...new Set(promoted.map(e => `<@${e.userId}>`))].join(' ')
-    await channel.send(`:fire: Z rezerwy do **głównego składu**: ${mentions} — ${fmtNowPL()}.`)
+    try {
+      await channel.send(`:fire: Z rezerwy do **głównego składu**: ${mentions} — ${fmtNowPL()}.`)
+    } catch (e) {
+      if (isMissingAccess(e)) {
+        console.warn('⚠️ Brak dostępu do kanału przy announce (pomijam).')
+      } else {
+        throw e
+      }
+    }
   }
   return promoted
 }
@@ -520,27 +540,44 @@ async function promoteAndAnnounce(channel, state) {
 async function rerender(interaction, state) {
   const guild = interaction.guild ?? client.guilds.cache.get(state.guildId)
   const newEmbed = buildEmbed(guild, state)
-  if (interaction.message && interaction.message.id === state.messageId) {
-    await interaction.message.edit({
+
+  try {
+    if (interaction.message && interaction.message.id === state.messageId) {
+      await interaction.message.edit({
+        embeds: [newEmbed],
+        components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
+      })
+      return
+    }
+    const msg = await interaction.channel.messages.fetch(state.messageId)
+    await msg.edit({
       embeds: [newEmbed],
       components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
     })
-    return
+  } catch (e) {
+    if (isMissingAccess(e)) {
+      console.warn('⚠️ Brak dostępu przy rerender (pomijam edycję).')
+      return
+    }
+    throw e
   }
-  const msg = await interaction.channel.messages.fetch(state.messageId)
-  await msg.edit({
-    embeds: [newEmbed],
-    components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
-  })
 }
 async function rerenderById(channel, state) {
   const guild = channel.guild ?? client.guilds.cache.get(state.guildId)
-  const msg = await channel.messages.fetch(state.messageId)
   const newEmbed = buildEmbed(guild, state)
-  await msg.edit({
-    embeds: [newEmbed],
-    components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
-  })
+  try {
+    const msg = await channel.messages.fetch(state.messageId)
+    await msg.edit({
+      embeds: [newEmbed],
+      components: [buttonsRow(state.panelId, !!state.meta.closed), altButtonsRow(state.panelId, !!state.meta.closed), manageRow(state.panelId)]
+    })
+  } catch (e) {
+    if (isMissingAccess(e)) {
+      console.warn('⚠️ Brak dostępu przy rerenderById (pomijam edycję).')
+      return
+    }
+    throw e
+  }
 }
 
 // ─────────────────────────── Handlery UI ───────────────────────────
@@ -591,7 +628,9 @@ client.on('interactionCreate', async interaction => {
           state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
           state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
           if (JSON.stringify({ main: state.main, reserve: state.reserve }) !== before) {
-            await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtNowPL()}.`)
+            if (canPost(interaction.channel)) {
+              try { await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się** z rajdu — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
+            }
           }
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
@@ -603,7 +642,9 @@ client.on('interactionCreate', async interaction => {
         await withLock(panelId, async () => {
           const hadAny = state.main.some(e => e.userId === userId) || state.reserve.some(e => e.userId === userId)
           removeAllUser(state, userId, { onlyAlts: false })
-          if (hadAny) await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtNowPL()}.`)
+          if (hadAny && canPost(interaction.channel)) {
+            try { await interaction.channel.send(`:x: <@${userId}> **wypisał(a) się (Wszystko)** — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
+          }
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
         })
@@ -614,7 +655,9 @@ client.on('interactionCreate', async interaction => {
         await withLock(panelId, async () => {
           const hadAlts = state.main.concat(state.reserve).some(e => e.userId === userId && e.isAlt)
           removeAllUser(state, userId, { onlyAlts: true })
-          if (hadAlts) await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`)
+          if (hadAlts && canPost(interaction.channel)) {
+            try { await interaction.channel.send(`:x: <@${userId}> **usunął(ęła) alty** — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
+          }
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
         })
@@ -623,7 +666,6 @@ client.on('interactionCreate', async interaction => {
 
       if (action === 'signup' || action === 'signup_alt') {
         if (action === 'signup_alt') {
-          // limit altów 3
           const altsCount = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt).length
           if (altsCount >= MAX_ALTS) {
             return interaction.reply({ ephemeral: true, content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).` })
@@ -730,11 +772,15 @@ client.on('interactionCreate', async interaction => {
         const mainMentions = mainIds.length ? mainIds.map(id => `<@${id}>`).join(' ') : '—'
         const resMentions  = resIds.length ? resIds.map(id => `<@${id}>`).join(' ')  : '—'
 
-        await interaction.channel.send(
-          `📣 **Oznaczenie zapisanych**\n${whenTxt}\n\n` +
-          `**Skład (${state.main.length}/${state.capacity})**: ${mainMentions}\n` +
-          `**Rezerwa (${state.reserve.length})**: ${resMentions}`
-        )
+        if (canPost(interaction.channel)) {
+          try {
+            await interaction.channel.send(
+              `📣 **Oznaczenie zapisanych**\n${whenTxt}\n\n` +
+              `**Skład (${state.main.length}/${state.capacity})**: ${mainMentions}\n` +
+              `**Rezerwa (${state.reserve.length})**: ${resMentions}`
+            )
+          } catch (e) { if (!isMissingAccess(e)) throw e }
+        }
         return interaction.reply({ content: 'Wysłano oznaczenie ✅', ephemeral: true })
       }
 
@@ -768,20 +814,17 @@ client.on('interactionCreate', async interaction => {
         const cls = parts[4]
         const sp = Math.min(cls === 'MSW' ? 7 : 11, parseInt(interaction.values[0], 10))
 
-        // modyfikacje stanu w locku
         await withLock(state.panelId, async () => {
           if (kind === 'madd') {
             const k = sessionKey(interaction, anyId)
             const sess = manageSessions.get(k)
             if (!sess?.targetId) return interaction.update({ content: 'Sesja zarządzania wygasła.', components: [] })
 
-            // nadpisywanie duplikatów main
             state.main = state.main.filter(e => !(e.userId === sess.targetId && !e.isAlt))
             state.reserve = state.reserve.filter(e => !(e.userId === sess.targetId && !e.isAlt))
 
             const entry = { userId: sess.targetId, cls, sp, isAlt: false }
             const goesToMainBeforePush = state.main.length < state.capacity
-            // push i rerender
             state.main.length < state.capacity ? state.main.push(entry) : state.reserve.push(entry)
             await promoteAndAnnounce(interaction.channel, state)
             await rerender(interaction, state); saveStateDebounced()
@@ -794,27 +837,21 @@ client.on('interactionCreate', async interaction => {
           let goesToMainBeforePush
 
           if (kind === 'main') {
-            // nadpisz poprzedni main tego usera
             state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
             state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
-            // sprawdzamy, czy jest miejsce zanim dodamy
             goesToMainBeforePush = state.main.length < state.capacity
-            // dodajemy
             if (goesToMainBeforePush) state.main.push({ userId, cls, sp, isAlt: false })
             else state.reserve.push({ userId, cls, sp, isAlt: false })
           } else {
-            // ALT: limit np. 3 — bez duplikatów
             const altsList = state.main.concat(state.reserve).filter(e => e.userId === userId && e.isAlt)
             if (altsList.length >= MAX_ALTS) {
               return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
             }
-            // czy wleci do mainu przed dodaniem?
             goesToMainBeforePush = state.main.length < state.capacity
             if (goesToMainBeforePush) state.main.push({ userId, cls, sp, isAlt: true })
             else state.reserve.push({ userId, cls, sp, isAlt: true })
           }
 
-          // auto-promocje + render + zapis
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
 
@@ -852,7 +889,9 @@ client.on('interactionCreate', async interaction => {
           const before = JSON.stringify({ main: state.main, reserve: state.reserve })
           removeAllUser(state, targetId, { onlyAlts: false })
           const changed = JSON.stringify({ main: state.main, reserve: state.reserve }) !== before
-          if (changed) await interaction.channel.send(`🗑️ <@${targetId}> usunięty przez lidera — ${fmtNowPL()}.`)
+          if (changed && canPost(interaction.channel)) {
+            try { await interaction.channel.send(`🗑️ <@${targetId}> usunięty przez lidera — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
+          }
           await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
           return interaction.update({ content: changed ? 'Usunięto ✅' : 'Użytkownik nie był zapisany.', components: [] })
@@ -862,33 +901,34 @@ client.on('interactionCreate', async interaction => {
           state.meta.leaderId = targetId
           state.meta.leaderMention = `<@${targetId}>`
           await rerenderById(interaction.channel, state); saveStateDebounced()
-          await interaction.channel.send(`👑 Nowy lider rajdu: <@${targetId}> — ${fmtNowPL()}.`)
+          if (canPost(interaction.channel)) {
+            try { await interaction.channel.send(`👑 Nowy lider rajdu: <@${targetId}> — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
+          }
           return interaction.update({ content: 'Zmieniono lidera ✅', components: [] })
         }
 
         if (mode === 'promote') {
-          // z rezerwy do składu (jeśli pełny skład -> ostatni z main do rezerwy)
           const idxRes = state.reserve.findIndex(e => e.userId === targetId)
           if (idxRes === -1) return interaction.update({ content: 'Użytkownik nie jest w rezerwie.', components: [] })
           const entry = state.reserve.splice(idxRes, 1)[0]
           if (state.main.length >= state.capacity) {
-            // zrzucamy ostatniego do rezerwy
             const bumped = state.main.pop()
             state.reserve.unshift(bumped)
           }
           state.main.push(entry)
           await rerender(interaction, state); saveStateDebounced()
-          await interaction.channel.send(`⬆️ <@${targetId}> przeniesiony przez lidera **do składu** — ${fmtNowPL()}.`)
+          if (canPost(interaction.channel)) {
+            try { await interaction.channel.send(`⬆️ <@${targetId}> przeniesiony przez lidera **do składu** — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
+          }
           return interaction.update({ content: `Przeniesiono <@${targetId}> do **składu** ✅`, components: [] })
         }
 
         if (mode === 'demote') {
-          // ze składu do rezerwy
           const idxMain = state.main.findIndex(e => e.userId === targetId)
           if (idxMain === -1) return interaction.update({ content: 'Użytkownik nie jest w składzie.', components: [] })
           const entry = state.main.splice(idxMain, 1)[0]
-          state.reserve.unshift(entry) // na początek rezerwy
-          await promoteAndAnnounce(interaction.channel, state) // wypełnij lukę i ogłoś
+          state.reserve.unshift(entry)
+          await promoteAndAnnounce(interaction.channel, state)
           await rerender(interaction, state); saveStateDebounced()
           return interaction.update({ content: `Przeniesiono <@${targetId}> do **rezerwy** ✅`, components: [] })
         }
@@ -912,10 +952,11 @@ client.on('interactionCreate', async interaction => {
         state.meta.dateText = dateText
         state.meta.timeText = timeText
         state.meta.startAt = startAtDate ? startAtDate.getTime() : undefined
-        // po zmianie terminu zdejmujemy auto-closed (otwieramy zapisy ponownie)
         state.meta.closed = false
         await rerenderById(interaction.channel, state); saveStateDebounced()
-        await interaction.channel.send(`🗓️ Lider zaktualizował termin rajdu na **${dateText} ${timeText}** — ${fmtNowPL()}.`)
+        if (canPost(interaction.channel)) {
+          try { await interaction.channel.send(`🗓️ Lider zaktualizował termin rajdu na **${dateText} ${timeText}** — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
+        }
       })
       return interaction.reply({ content: 'Zmieniono termin ✅', ephemeral: true })
     }

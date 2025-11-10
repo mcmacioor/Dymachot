@@ -21,8 +21,12 @@ const {
 } = require('discord.js')
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds],
-    partials: [Partials.Channel],
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ],
+    partials: [Partials.Channel, Partials.Message]
 })
 
 /**
@@ -659,5 +663,6 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 
 

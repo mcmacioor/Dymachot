@@ -517,7 +517,12 @@ client.on('interactionCreate', async interaction => {
       const [prefix, anyId, action] = interaction.customId.split(':')
       if (prefix !== 'raid') return
       const state = getStateByAnyId(anyId)
-      if (!state) return interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      if (!state) {
+      try {
+        return await interaction.reply({ content: 'Ten panel zapisów nie jest już aktywny.', ephemeral: true })
+      } catch {}
+      return
+    }
       const panelId = state.panelId
       const userId = interaction.user.id
       const isLeader = userId === state.meta.leaderId
@@ -596,13 +601,33 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (action === 'manage') {
-        if (!isLeader) return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
-        return interaction.reply({
-          ephemeral: true,
-          content: 'Panel zarządzania:',
-          components: [managePanelRow(panelId), managePanelRow2(panelId)]
-        })
+        // tylko lider
+        if (!isLeader) {
+          return interaction.reply({ content: 'Tylko lider może zarządzać tym rajdem.', ephemeral: true })
+        }
+      
+        try {
+          // szybki defer, żeby Discord nie wywalił timeoutu
+          await interaction.deferReply({ ephemeral: true })
+      
+          // właściwa odpowiedź
+          await interaction.editReply({
+            content: 'Panel zarządzania:',
+            components: [managePanelRow(panelId), managePanelRow2(panelId)]
+          })
+        } catch (err) {
+          console.error('manage panel error:', err)
+          try {
+            if (interaction.deferred || interaction.replied) {
+              await interaction.editReply({ content: '❌ Nie udało się otworzyć panelu zarządzania.' })
+            } else {
+              await interaction.reply({ content: '❌ Nie udało się otworzyć panelu zarządzania.', ephemeral: true })
+            }
+          } catch {}
+        }
+        return
       }
+
 
       if (!isLeader && action.startsWith('m_')) {
         return interaction.reply({ content: 'Tylko lider może zarządzać.', ephemeral: true })
@@ -966,3 +991,4 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

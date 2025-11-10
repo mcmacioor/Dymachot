@@ -303,6 +303,7 @@ function spSelect(panelId, kind, cls, guild) {
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
+  .setDefaultMemberPermissions('0')
   .addUserOption(o => o.setName('lider').setDescription('Lider rajdu').setRequired(true))
   .addStringOption(o => o.setName('jaki_raid').setDescription('Jaki rajd').setRequired(true))
   .addStringOption(o => o.setName('wymogi').setDescription('Wymogi (np. C90').setRequired(true))
@@ -626,4 +627,5 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 

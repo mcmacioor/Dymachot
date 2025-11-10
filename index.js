@@ -46,8 +46,9 @@ const client = new Client({
 const raids = new Map()
 
 // ─────────────────────────── Trwałość (JSON) ───────────────────────────
-if (!fs.existsSync(DATA_PATH)) fs.writeFileSync(DATA_PATH, JSON.stringify({}), 'utf8')
 const DATA_PATH = process.env.RAIDS_PATH || path.join(__dirname, 'raids.json')
+
+if (!fs.existsSync(DATA_PATH)) fs.writeFileSync(DATA_PATH, JSON.stringify({}), 'utf8')
 
 function parsePolishDate(dateText, timeText) {
     if (!dateText || !timeText) return null
@@ -658,4 +659,5 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 

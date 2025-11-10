@@ -180,7 +180,7 @@ function spEmoji(cls, sp) {
 function equipmentBlock() {
     return (
         '**Wyposażenie:**\n' +
-        'Ancelloan Ancek dla peta\n' +
+        ':Ancelloan: Ancek dla peta\n' +
         ':Wzmacniacz: Wzmacniacz wrózki\n' +
         ':Tarot: Demon/słońce 250\n' +
         ':Eliksirataku: Potki ataku\n' +
@@ -663,6 +663,7 @@ client.on('interactionCreate', async interaction => {
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 
 
 

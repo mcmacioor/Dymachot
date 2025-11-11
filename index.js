@@ -538,7 +538,7 @@ client.once('ready', async () => {
             channel = guild?.channels?.cache?.get(state.channelId) || (await client.channels.fetch(state.channelId))
           }
           if (canPost(channel)) {
-            await channel.send(`⬆️ <@${top.userId}> **automatycznie przeniesiony(a) do głównego składu** (po 5 min oczekiwania) — ${fmtNowPL()}.`)
+            await channel.send(`⬆️ <@${top.userId}> **automatycznie przeniesiony(a) do głównego składu** — ${fmtNowPL()}.`)
           }
         } catch (e) { if (!isMissingAccess(e)) console.error(e) }
       }
@@ -1095,4 +1095,5 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+
 

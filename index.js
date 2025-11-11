@@ -52,9 +52,19 @@ async function withLock(key, fn) {
 const DATA_PATH = process.env.RAIDS_PATH || path.join(__dirname, 'raids.json')
 if (!fs.existsSync(DATA_PATH)) fs.writeFileSync(DATA_PATH, JSON.stringify({}), 'utf8')
 
+// PODMIEŃ TĘ FUNKCJĘ W TWOIM PLIKU:
+
 function parsePolishDate(dateText, timeText) {
   if (!dateText || !timeText) return null
-  const norm = s => s.toLowerCase().replaceAll(',', ' ').replaceAll('.', ' ').replaceAll('-', ' ').replace(/\s+/g, ' ').trim()
+
+  // --- parser polskich dat ---
+  const norm = s => s.toLowerCase()
+    .replaceAll(',', ' ')
+    .replaceAll('.', ' ')
+    .replaceAll('-', ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
   const MONTHS = {
     'stycznia': 1, 'styczen': 1, 'styczeń': 1,
     'lutego': 2, 'luty': 2,
@@ -69,12 +79,16 @@ function parsePolishDate(dateText, timeText) {
     'listopada': 11, 'listopad': 11,
     'grudnia': 12, 'grudzien': 12, 'grudzień': 12
   }
-  const d = norm(dateText), t = norm(timeText)
+
+  const d = norm(dateText)
+  const t = norm(timeText)
 
   let day, month, year
   const num = d.match(/(\d{1,2})\s+(\d{1,2})\s+(\d{4})/)
   if (num) {
-    day = parseInt(num[1], 10); month = parseInt(num[2], 10); year = parseInt(num[3], 10)
+    day = parseInt(num[1], 10)
+    month = parseInt(num[2], 10)
+    year = parseInt(num[3], 10)
   } else {
     const parts = d.split(' ')
     let i = 0
@@ -88,12 +102,45 @@ function parsePolishDate(dateText, timeText) {
 
   const tm = t.match(/(\d{1,2})\s*:\s*(\d{2})/)
   if (!tm) return null
-  const hh = parseInt(tm[1], 10), mm = parseInt(tm[2], 10)
+  const hh = parseInt(tm[1], 10)
+  const mm = parseInt(tm[2], 10)
   if (isNaN(hh) || isNaN(mm)) return null
 
-  // dzięki TZ=Europe/Warsaw to jest już “polskie” wall-time
-  return new Date(year, month - 1, day, hh, mm, 0, 0)
+  // --- KLUCZ: wyliczamy UTC dla lokalnego czasu Europe/Warsaw (z uwzględnieniem DST) ---
+  const ms = zonedTimeToUtcMs({ year, month, day, hour: hh, minute: mm }, 'Europe/Warsaw')
+  return new Date(ms)
 }
+
+// Helper: zamienia "lokalny czas w strefie TZ" → timestamp UTC (ms)
+function zonedTimeToUtcMs(parts, timeZone) {
+  const { year, month, day, hour = 0, minute = 0, second = 0 } = parts
+  // "Zgadywanka" UTC z tymi samymi częściami
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second, 0)
+
+  // Jak ta chwila wygląda w strefie timeZone?
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  })
+  const partsList = dtf.formatToParts(new Date(utcGuess))
+  const map = Object.fromEntries(partsList.map(p => [p.type, p.value]))
+  const asUtc = Date.UTC(
+    parseInt(map.year, 10),
+    parseInt(map.month, 10) - 1,
+    parseInt(map.day, 10),
+    parseInt(map.hour, 10),
+    parseInt(map.minute, 10),
+    parseInt(map.second, 10)
+  )
+
+  // Różnica mówi nam, jaki jest offset strefy (w tym DST) dla tej daty
+  const offset = asUtc - utcGuess
+  // A prawdziwe UTC dla "lokalnego czasu" to:
+  return utcGuess - offset
+}
+
 
 function loadState() {
   try {
@@ -1048,3 +1095,4 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

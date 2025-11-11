@@ -52,12 +52,10 @@ async function withLock(key, fn) {
 const DATA_PATH = process.env.RAIDS_PATH || path.join(__dirname, 'raids.json')
 if (!fs.existsSync(DATA_PATH)) fs.writeFileSync(DATA_PATH, JSON.stringify({}), 'utf8')
 
-// PODMIEŃ TĘ FUNKCJĘ W TWOIM PLIKU:
-
+// Parser PL z poprawnym DST
 function parsePolishDate(dateText, timeText) {
   if (!dateText || !timeText) return null
 
-  // --- parser polskich dat ---
   const norm = s => s.toLowerCase()
     .replaceAll(',', ' ')
     .replaceAll('.', ' ')
@@ -106,18 +104,14 @@ function parsePolishDate(dateText, timeText) {
   const mm = parseInt(tm[2], 10)
   if (isNaN(hh) || isNaN(mm)) return null
 
-  // --- KLUCZ: wyliczamy UTC dla lokalnego czasu Europe/Warsaw (z uwzględnieniem DST) ---
   const ms = zonedTimeToUtcMs({ year, month, day, hour: hh, minute: mm }, 'Europe/Warsaw')
   return new Date(ms)
 }
 
-// Helper: zamienia "lokalny czas w strefie TZ" → timestamp UTC (ms)
+// Helper: lokalny czas (TZ) → UTC ms (z DST)
 function zonedTimeToUtcMs(parts, timeZone) {
   const { year, month, day, hour = 0, minute = 0, second = 0 } = parts
-  // "Zgadywanka" UTC z tymi samymi częściami
   const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second, 0)
-
-  // Jak ta chwila wygląda w strefie timeZone?
   const dtf = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric', month: '2-digit', day: '2-digit',
@@ -134,13 +128,9 @@ function zonedTimeToUtcMs(parts, timeZone) {
     parseInt(map.minute, 10),
     parseInt(map.second, 10)
   )
-
-  // Różnica mówi nam, jaki jest offset strefy (w tym DST) dla tej daty
   const offset = asUtc - utcGuess
-  // A prawdziwe UTC dla "lokalnego czasu" to:
   return utcGuess - offset
 }
-
 
 function loadState() {
   try {
@@ -520,7 +510,6 @@ client.once('ready', async () => {
     const now = Date.now()
     for (const [, state] of raids) {
       if (state.meta?.closed) continue
-      // awansuj kolejno, ale tylko tych co czekają >= 5 min
       let changed = false
       const guild = client.guilds.cache.get(state.guildId)
       let channel = null
@@ -528,11 +517,9 @@ client.once('ready', async () => {
         const top = state.reserve[0]
         const waitedLongEnough = (now - (top.joinedAt || now)) >= (5 * 60 * 1000)
         if (!waitedLongEnough) break
-        // przenosimy
         state.reserve.shift()
         state.main.push(top)
         changed = true
-        // oznacz przeniesionego
         try {
           if (!channel) {
             channel = guild?.channels?.cache?.get(state.channelId) || (await client.channels.fetch(state.channelId))
@@ -626,8 +613,7 @@ function removeAllUser(state, userId, { onlyAlts = false } = {}) {
 function promoteFromReserve(_state) { return [] }
 
 // “stub” zostawiony dla zgodności z wywołaniami
-async function promoteAndAnnounce(_channel, state) {
-  // awanse robi ticker co 30s po 5 minutach — tutaj nic nie ruszamy
+async function promoteAndAnnounce(_channel, _state) {
   return []
 }
 
@@ -917,31 +903,21 @@ client.on('interactionCreate', async interaction => {
             const goesToMainBeforePush = state.main.length < state.capacity
             if (goesToMainBeforePush) {
               state.main.push(entry)
-              // info dla osoby: wpisanie do składu
-              if (canPost(interaction.channel)) {
-                try { await interaction.channel.send(`✅ <@${entry.userId}> **wpisany(a) do głównego składu** — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
-              }
             } else {
               state.reserve.push({ ...entry, joinedAt: Date.now() })
             }
             await rerender(interaction, state); saveStateDebounced()
             manageSessions.delete(k)
-            const whereTxt = goesToMainBeforePush ? 'do **głównego składu**' : 'do **rezerwy**'
-            return interaction.update({ content: `Dodano: <@${sess.targetId}> ${classEmoji(interaction.guild, cls)} SP ${sp} — ${whereTxt} ✅`, components: [] })
+            return interaction.update({ content: 'Dodano ✅', components: [] })
           }
 
           const userId = interaction.user.id
-          let goesToMainBeforePush
 
           if (kind === 'main') {
             state.main = state.main.filter(e => !(e.userId === userId && !e.isAlt))
             state.reserve = state.reserve.filter(e => !(e.userId === userId && !e.isAlt))
-            goesToMainBeforePush = state.main.length < state.capacity
-            if (goesToMainBeforePush) {
+            if (state.main.length < state.capacity) {
               state.main.push({ userId, cls, sp, isAlt: false })
-              if (canPost(interaction.channel)) {
-                try { await interaction.channel.send(`✅ <@${userId}> **wpisany(a) do głównego składu** — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
-              }
             } else {
               state.reserve.push({ userId, cls, sp, isAlt: false, joinedAt: Date.now() })
             }
@@ -950,21 +926,15 @@ client.on('interactionCreate', async interaction => {
             if (altsList.length >= MAX_ALTS) {
               return interaction.update({ content: `❌ Osiągnięto limit ALT-ów (${MAX_ALTS}).`, components: [] })
             }
-            goesToMainBeforePush = state.main.length < state.capacity
-            if (goesToMainBeforePush) {
+            if (state.main.length < state.capacity) {
               state.main.push({ userId, cls, sp, isAlt: true })
-              if (canPost(interaction.channel)) {
-                try { await interaction.channel.send(`✅ <@${userId}> (Alt) **wpisany(a) do głównego składu** — ${fmtNowPL()}.`) } catch (e) { if (!isMissingAccess(e)) throw e }
-              }
             } else {
               state.reserve.push({ userId, cls, sp, isAlt: true, joinedAt: Date.now() })
             }
           }
 
           await rerender(interaction, state); saveStateDebounced()
-
-          const whereTxt = goesToMainBeforePush ? 'do **głównego składu**' : 'do **rezerwy**'
-          return interaction.update({ content: `Zapisano ${whereTxt} ✅`, components: [] })
+          return interaction.update({ content: '✅ Zapisano', components: [] })
         })
       }
     }
@@ -1095,5 +1065,3 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
-
-

@@ -559,7 +559,6 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: 'Nie masz uprawnień do użycia tej komendy.', ephemeral: true })
     }
     try {
-      await interaction.reply({ content: '👋 Ok, opuszczam ten serwer.', ephemeral: true })
       await interaction.guild.leave()
       console.log(`Bot opuścił serwer ${interaction.guild.id} na żądanie ownera ${interaction.user.id}`)
     } catch (err) {
@@ -1091,3 +1090,4 @@ server.listen(PORT, () => console.log(`Healthcheck on :${PORT}`))
 
 // ─────────────────────────── Start ───────────────────────────
 client.login(process.env.BOT_TOKEN)
+

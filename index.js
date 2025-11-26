@@ -24,6 +24,9 @@ const {
   PermissionFlagsBits,
 } = require('discord.js')
 
+// ID właściciela bota (z .env: OWNER_ID=123456789012345678)
+const OWNER_ID = process.env.OWNER_ID
+
 // ─────────────────────────── Client (ograniczony cache) ───────────────────────────
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
@@ -452,7 +455,7 @@ function spSelect(panelId, kind, cls, guild) {
   )
 }
 
-// ─────────────────────────── /raid ───────────────────────────
+// ─────────────────────────── Slash commands ───────────────────────────
 const raidCreateCmd = new SlashCommandBuilder()
   .setName('raid')
   .setDescription('Utwórz ogłoszenie rajdu z zapisami')
@@ -469,13 +472,18 @@ const raidCreateCmd = new SlashCommandBuilder()
   .addStringOption(o => o.setName('godzina').setDescription('Godzina (np. 21:00)').setRequired(true))
   .addStringOption(o => o.setName('czas_trwania').setDescription('Czas trwania (np. 1h)').setRequired(true))
 
+// /leave – bot opuszcza serwer (tylko OWNER_ID)
+const leaveCmd = new SlashCommandBuilder()
+  .setName('leave')
+  .setDescription('Nakazuje botowi opuścić ten serwer (tylko właściciel bota).')
+
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN)
   await rest.put(
     Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.DEV_GUILD_ID),
-    { body: [raidCreateCmd.toJSON()] }
+    { body: [raidCreateCmd.toJSON(), leaveCmd.toJSON()] }
   )
-  console.log('✅ Zarejestrowano /raid (guild).')
+  console.log('✅ Zarejestrowano /raid oraz /leave (guild).')
 }
 
 client.once('ready', async () => {
@@ -541,9 +549,27 @@ client.once('ready', async () => {
   }, 30 * 1000)
 })
 
-// ─────────────────────────── Tworzenie rajdu ───────────────────────────
+// ─────────────────────────── Tworzenie rajdu + /leave ───────────────────────────
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return
+
+  // /leave – tylko właściciel bota
+  if (interaction.commandName === 'leave') {
+    if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
+      return interaction.reply({ content: 'Nie masz uprawnień do użycia tej komendy.', ephemeral: true })
+    }
+    try {
+      await interaction.reply({ content: '👋 Ok, opuszczam ten serwer.', ephemeral: true })
+      await interaction.guild.leave()
+      console.log(`Bot opuścił serwer ${interaction.guild.id} na żądanie ownera ${interaction.user.id}`)
+    } catch (err) {
+      console.error('Błąd przy opuszczaniu serwera:', err)
+      try { await interaction.followUp({ content: '❌ Nie udało się opuścić serwera.', ephemeral: true }) } catch {}
+    }
+    return
+  }
+
+  // /raid
   if (interaction.commandName !== 'raid') return
 
   const leader = interaction.user
